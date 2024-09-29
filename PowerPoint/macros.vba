@@ -83,3 +83,32 @@ Sub MultipleCropping()
     
     MsgBox "Cropping applied to all selected shapes.", vbInformation
 End Sub
+
+
+Sub ReplaceObject()
+    On Error GoTo ErrorHandler
+    
+    Dim shp1 As Shape
+    Dim shp2 As Shape
+    
+    If ActiveWindow.Selection.ShapeRange.Count <> 2 Then
+        MsgBox "Please select exactly two picture objects.", vbExclamation
+        Exit Sub
+    End If
+    
+    Set shp1 = ActiveWindow.Selection.ShapeRange(1)
+    Set shp2 = ActiveWindow.Selection.ShapeRange(2)
+    
+    ' Move second shape to first shape's position
+    shp2.Left = shp1.Left
+    shp2.Top = shp1.Top
+    
+    ' Delete first shape
+    shp1.Delete
+    
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "An error occurred: " & Err.Description, vbCritical
+End Sub
+
