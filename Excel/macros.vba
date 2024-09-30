@@ -67,3 +67,9 @@ Sub DeleteEmptyRows()
     Application.ScreenUpdating = True
     Application.Calculation = xlCalculationAutomatic
 End Sub
+
+Sub SaveAsXLSX()
+    Dim filePath As String
+    filePath = ThisWorkbook.Path & "\" & Left(ThisWorkbook.Name, InStrRev(ThisWorkbook.Name, ".") - 1) & ".xlsx"
+    ThisWorkbook.SaveAs Filename:=filePath, FileFormat:=xlOpenXMLWorkbook
+End Sub
