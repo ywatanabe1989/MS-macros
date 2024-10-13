@@ -73,3 +73,31 @@ Sub SaveAsXLSX()
     filePath = ThisWorkbook.Path & "\" & Left(ThisWorkbook.Name, InStrRev(ThisWorkbook.Name, ".") - 1) & ".xlsx"
     ThisWorkbook.SaveAs Filename:=filePath, FileFormat:=xlOpenXMLWorkbook
 End Sub
+
+
+Sub ZebraRows()
+    Dim rng As Range
+    Dim lastRow As Long, lastCol As Long
+    Dim i As Long
+    
+    ' Prompt user to select the range
+    On Error Resume Next
+    Set rng = Application.InputBox("Select the range for zebra striping", Type:=8)
+    On Error GoTo 0
+    
+    If rng Is Nothing Then Exit Sub
+    
+    ' Determine last row and column of selected range
+    lastRow = rng.Rows.Count
+    lastCol = rng.Columns.Count
+    
+    ' Apply zebra striping
+    For i = 1 To lastRow Step 2
+        rng.Rows(i).Interior.Color = RGB(240, 240, 240) ' Light gray
+    Next i
+    
+    ' Clear formatting for even rows
+    For i = 2 To lastRow Step 2
+        rng.Rows(i).Interior.Color = xlNone
+    Next i
+End Sub
