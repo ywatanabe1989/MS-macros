@@ -43,3 +43,7 @@ To create keyboard shortcuts:
 2. Click Customize next to Keyboard shortcuts.
 3. Under Categories, select Macros.
 4. Select your macro and assign a shortcut key.
+
+
+
+https://note.com/ppdtp/n/n1c6a379796a8#1a16cb77-4cc8-4497-8ae2-f7cc2e1638d4
