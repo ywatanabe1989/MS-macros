@@ -275,7 +275,7 @@ try {
     [void](Add-TextBox $config "SCITEX_CONFIG_HIDE_LABEL" "Hide hidden slides from TOC" 60 385 265 30 14 $muted $false)
     [void](Add-ConfigValue $config "SCITEX_CFG_HIDE_HIDDEN" "Yes" 310 378 65 38)
     [void](Add-TextBox $config "SCITEX_CONFIG_VERSION_LABEL" "Version" 425 385 75 30 14 $muted $false)
-    [void](Add-ConfigValue $config "SCITEX_CFG_VERSION" "0.1.0" 500 378 110 38)
+    [void](Add-ConfigValue $config "SCITEX_CFG_VERSION" "0.1.1" 500 378 110 38)
     [void](Add-TextBox $config "SCITEX_CONFIG_FOOTER" "Accepted values: Yes / No. This slide is always excluded from the TOC and slide show." 45 458 630 42 13 $muted $false)
     $config.Tags.Add("SCITEX_CONFIG", "1")
     $config.Tags.Add("SCITEX_ALWAYS_SKIP", "1")
@@ -316,7 +316,7 @@ try {
         Assert-Equal $tocSlide.Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Paragraphs(2, 1).IndentLevel 2 "TOC slide $($tocSpec.Slide) child indentation"
     }
     Assert-True (($leftExpected -join "|") -notmatch "3h\.") "hidden slide excluded from TOC"
-    Assert-Equal $presentation.Slides.Item(29).Shapes.Item("SCITEX_CFG_VERSION").TextFrame.TextRange.Text "0.1.0" "configuration version"
+    Assert-Equal $presentation.Slides.Item(29).Shapes.Item("SCITEX_CFG_VERSION").TextFrame.TextRange.Text "0.1.1" "configuration version"
     $configText = ""
     foreach ($shape in $presentation.Slides.Item(29).Shapes) {
         if ($shape.HasTextFrame -eq -1 -and $shape.TextFrame.HasText -eq -1) { $configText += $shape.TextFrame.TextRange.Text }
@@ -336,7 +336,7 @@ try {
         hierarchical_indentation = "passed"
         hidden_slide_filter = "passed"
         english_configuration = "passed"
-        version = "0.1.0"
+        version = "0.1.1"
         non_navigation_content_preserved = "passed"
         master_and_layout_counts_preserved = "passed"
     } | ConvertTo-Json

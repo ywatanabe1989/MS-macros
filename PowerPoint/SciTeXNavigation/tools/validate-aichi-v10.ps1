@@ -126,7 +126,7 @@ try {
     Assert-Equal ([regex]::Matches($source, "(?im)^\s*Public\s+Sub\s+").Count) 1 "public macro count"
     $versionMatch = [regex]::Match($source, 'NAVIGATION_VERSION\s+As\s+String\s*=\s*"([^"]+)"')
     Assert-True $versionMatch.Success "source version constant"
-    Assert-Equal $versionMatch.Groups.Item(1).Value "0.1.0" "source version"
+    Assert-Equal $versionMatch.Groups.Item(1).Value "0.1.1" "source version"
 
     $sentinelBodySize = $presentation.Slides.Item(25).Shapes.Item("Box133").TextFrame.TextRange.Font.Size
     Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
@@ -197,6 +197,24 @@ try {
         $presentation.Slides.Item(27).Shapes.Item("SCITEX_TOC_BODY_RIGHT").TextFrame.TextRange.Text
     ) -join "|"
     Assert-Equal $stateAfterFinalRun $stateBeforeFinalRun "final idempotent run"
+
+    # Regression: PowerPoint copies slide tags, so a TOC duplicated from the
+    # section-3 position used to keep section 3 emphasized after moving to slide 2.
+    $duplicateRange = $presentation.Slides.Item(8).Duplicate()
+    $copiedToc = $duplicateRange.Item(1)
+    $copiedToc.MoveTo(2)
+    Assert-Equal $presentation.Slides.Count 30 "copied TOC slide count"
+    Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
+    Assert-Equal $copiedToc.SlideIndex 2 "copied TOC moved position"
+    Assert-Equal $copiedToc.Tags.Item("SCITEX_CURRENT_SECTION") "1" "copied TOC inferred current section"
+    $copiedLeftBody = $copiedToc.Shapes.Item("SCITEX_TOC_BODY_LEFT")
+    $copiedRightBody = $copiedToc.Shapes.Item("SCITEX_TOC_BODY_RIGHT")
+    Assert-Equal $copiedLeftBody.TextFrame.TextRange.Paragraphs(1, 1).Characters(1, 1).Font.Color.RGB (ConvertTo-Rgb 27 38 53) "copied TOC section 1 emphasized"
+    Assert-Equal $copiedLeftBody.TextFrame.TextRange.Paragraphs(7, 1).Characters(1, 1).Font.Color.RGB (ConvertTo-Rgb 170 179 188) "copied TOC stale section 3 dimmed"
+    Assert-Equal $copiedRightBody.TextFrame.TextRange.Paragraphs(1, 1).Characters(1, 1).Font.Color.RGB (ConvertTo-Rgb 170 179 188) "copied TOC right column dimmed"
+    $copiedToc.Delete()
+    Assert-Equal $presentation.Slides.Count 29 "copied TOC cleanup slide count"
+    Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
     $presentation.Save()
 
     [ordered]@{
@@ -207,6 +225,7 @@ try {
         toc_links_checked = 69
         hierarchical_indentation = "passed"
         current_section_emphasis = "passed"
+        copied_toc_section_inference = "passed"
         hidden_slide_toggle = "passed"
         typography_limits = "passed"
         typography_reversible = "passed"

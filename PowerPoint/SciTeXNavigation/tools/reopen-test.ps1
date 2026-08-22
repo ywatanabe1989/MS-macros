@@ -97,7 +97,7 @@ try {
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_FONT_MIN").TextFrame.TextRange.Text "18" "reopened minimum font size configuration"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_FONT_MAX").TextFrame.TextRange.Text "32" "reopened maximum font size configuration"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_HIDE_HIDDEN").TextFrame.TextRange.Text "Yes" "reopened hidden-slide configuration"
-    Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_VERSION").TextFrame.TextRange.Text "0.1.0" "reopened configuration version"
+    Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_VERSION").TextFrame.TextRange.Text "0.1.1" "reopened configuration version"
     $configText = ""
     foreach ($shape in $presentation.Slides.Item(7).Shapes) {
         if ($shape.HasTextFrame -eq -1 -and $shape.TextFrame.HasText -eq -1) {
@@ -167,7 +167,7 @@ try {
         font_size_bounds = "passed"
         hidden_slide_toc_toggle = "passed"
         english_only_configuration_page = "passed"
-        version = "0.1.0"
+        version = "0.1.1"
         settings_slide_hidden = "passed"
         public_macro_count = $publicSubCount
     }
