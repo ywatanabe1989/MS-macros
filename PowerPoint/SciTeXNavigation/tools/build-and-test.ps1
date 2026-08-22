@@ -211,7 +211,7 @@ try {
     [void](Add-TextBox $settings "SCITEX_CONFIG_TOC_TITLE" "Table of contents" 78 345 300 34 20 $ink $true)
     [void](Add-TextBox $settings "SCITEX_CONFIG_HIDE_LABEL" "Hide hidden slides from TOC" 78 392 390 34 16 $muted $false)
     [void](Add-TextBox $settings "SCITEX_CONFIG_VERSION_LABEL" "Version" 505 392 100 34 16 $muted $false)
-    [void](Add-ConfigValue $settings "SCITEX_CFG_VERSION" "0.1.0" 605 385 120 40)
+    [void](Add-ConfigValue $settings "SCITEX_CFG_VERSION" "0.1.1" 605 385 120 40)
     [void](Add-ConfigValue $settings "SCITEX_CFG_HIDE_HIDDEN" "Yes" 770 385 85 40)
     [void](Add-TextBox $settings "SCITEX_CONFIG_FOOTER" "Accepted values: Yes / No. This configuration slide is always excluded from the TOC and slide show." 60 458 840 45 14 $muted $false)
     $settings.Tags.Add("SCITEX_CONFIG", "1")
@@ -261,7 +261,7 @@ try {
     }
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(1) "SCITEX_RUN_BUTTON").ActionSettings.Item(1).Action 8 "cover run button action"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(1) "SCITEX_RUN_BUTTON").ActionSettings.Item(1).Run "RunSciTeXNavigation" "cover run button macro"
-    Assert-Equal (Get-NamedShape $presentation.Slides.Item(1) "SCITEX_STATUS").TextFrame.TextRange.Text "Navigation v0.1.0 updated - 2 sections" "cover run status"
+    Assert-Equal (Get-NamedShape $presentation.Slides.Item(1) "SCITEX_STATUS").TextFrame.TextRange.Text "Navigation v0.1.1 updated - 2 sections" "cover run status"
     Assert-True ($presentation.Slides.Item(7).SlideShowTransition.Hidden -ne 0) "settings slide hidden"
     Assert-Equal $presentation.Slides.Item(7).Tags.Item("SCITEX_CONFIG") "1" "settings slide tag"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_FONT_LATIN").TextFrame.TextRange.Text "Aptos" "configured Latin font"
@@ -269,7 +269,7 @@ try {
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_FONT_MIN").TextFrame.TextRange.Text "18" "configured minimum font size"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_FONT_MAX").TextFrame.TextRange.Text "32" "configured maximum font size"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_HIDE_HIDDEN").TextFrame.TextRange.Text "Yes" "configured hidden-slide behavior"
-    Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_VERSION").TextFrame.TextRange.Text "0.1.0" "configuration version"
+    Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_VERSION").TextFrame.TextRange.Text "0.1.1" "configuration version"
     $configText = ""
     foreach ($shape in $presentation.Slides.Item(7).Shapes) {
         if ($shape.HasTextFrame -eq -1 -and $shape.TextFrame.HasText -eq -1) {
@@ -327,7 +327,7 @@ try {
         font_size_bounds = "passed"
         hidden_slide_toc_toggle = "passed"
         english_only_configuration_page = "passed"
-        version = "0.1.0"
+        version = "0.1.1"
         run_button = "passed"
         settings_slide_preserved_hidden = "passed"
     }

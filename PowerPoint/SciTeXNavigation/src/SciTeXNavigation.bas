@@ -1,7 +1,7 @@
 Attribute VB_Name = "SciTeXNavigation"
 Option Explicit
 
-Private Const NAVIGATION_VERSION As String = "0.1.0"
+Private Const NAVIGATION_VERSION As String = "0.1.1"
 Private Const TAG_CONFIG As String = "SCITEX_CONFIG"
 Private Const TAG_COVER As String = "SCITEX_COVER"
 Private Const TAG_TOC As String = "SCITEX_TOC"
@@ -19,6 +19,7 @@ Private Const CFG_FONT_CJK As String = "SCITEX_CFG_FONT_CJK"
 Private Const CFG_FONT_MIN As String = "SCITEX_CFG_FONT_MIN"
 Private Const CFG_FONT_MAX As String = "SCITEX_CFG_FONT_MAX"
 Private Const CFG_HIDE_HIDDEN As String = "SCITEX_CFG_HIDE_HIDDEN"
+Private Const CFG_VERSION As String = "SCITEX_CFG_VERSION"
 Private Const TAG_ORIGINAL_FONT_SIZE As String = "SCITEX_ORIGINAL_FONT_SIZE"
 
 Private mFontLatin As String
@@ -40,6 +41,7 @@ Public Sub RunSciTeXNavigation()
 
     Set pres = ActivePresentation
     LoadConfiguration pres
+    SetDisplayedVersion pres
     mExplicitNavigation = HasExplicitNavigation(pres)
     sectionNumber = 0
     childNumber = 0
@@ -99,8 +101,11 @@ Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
         Set leftBody = FindNamedShape(tocSlide, TOC_BODY_LEFT)
         Set rightBody = FindNamedShape(tocSlide, TOC_BODY_RIGHT)
         If leftBody Is Nothing Or rightBody Is Nothing Then Err.Raise vbObjectError + 2100, , "Explicit TOC requires left and right body shapes."
-        RebuildExplicitTocColumn pres, tocSlide, leftBody, True
-        RebuildExplicitTocColumn pres, tocSlide, rightBody, False
+        currentSection = ResolveCurrentSection(pres, tocSlide)
+        If currentSection <= 0 Then Err.Raise vbObjectError + 2113, , "Cannot infer the current section for TOC slide " & CStr(tocSlide.SlideIndex) & "."
+        tocSlide.Tags.Add TAG_CURRENT_SECTION, CStr(currentSection)
+        RebuildExplicitTocColumn pres, tocSlide, leftBody, True, currentSection
+        RebuildExplicitTocColumn pres, tocSlide, rightBody, False, currentSection
         Exit Sub
     End If
 
@@ -200,20 +205,18 @@ Private Function RenumberExplicitSlides(ByVal pres As Presentation) As Long
     RenumberExplicitSlides = maximumSection
 End Function
 
-Private Sub RebuildExplicitTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide, ByVal body As Shape, ByVal isLeftColumn As Boolean)
+Private Sub RebuildExplicitTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide, ByVal body As Shape, ByVal isLeftColumn As Boolean, ByVal currentSection As Long)
     Dim target As Slide
     Dim targetIndex As Long
     Dim lineNumber As Long
     Dim tocText As String
     Dim navigationCode As String
     Dim targetSection As Long
-    Dim currentSection As Long
     Dim splitAfter As Long
     Dim paragraphRange As TextRange
     Dim linkRange As TextRange
     Dim linkLength As Long
 
-    currentSection = CLng(Val(SlideTag(tocSlide, TAG_CURRENT_SECTION)))
     splitAfter = CLng(Val(SlideTag(tocSlide, TAG_TOC_SPLIT_AFTER)))
     If splitAfter <= 0 Then splitAfter = 3
     tocText = ""
@@ -276,6 +279,32 @@ Private Sub RebuildExplicitTocColumn(ByVal pres As Presentation, ByVal tocSlide 
     Next targetIndex
 End Sub
 
+Private Function ResolveCurrentSection(ByVal pres As Presentation, ByVal tocSlide As Slide) As Long
+    Dim targetIndex As Long
+    Dim navigationCode As String
+
+    ' A copied or moved TOC keeps its old tags. Prefer the first navigated slide
+    ' after its new position so the TOC automatically follows the deck order.
+    For targetIndex = tocSlide.SlideIndex + 1 To pres.Slides.Count
+        navigationCode = SlideTag(pres.Slides(targetIndex), TAG_NAV_CODE)
+        If Len(navigationCode) > 0 Then
+            ResolveCurrentSection = CLng(Val(navigationCode))
+            Exit Function
+        End If
+    Next targetIndex
+
+    ' A TOC placed at the end belongs to the most recent preceding section.
+    For targetIndex = tocSlide.SlideIndex - 1 To 1 Step -1
+        navigationCode = SlideTag(pres.Slides(targetIndex), TAG_NAV_CODE)
+        If Len(navigationCode) > 0 Then
+            ResolveCurrentSection = CLng(Val(navigationCode))
+            Exit Function
+        End If
+    Next targetIndex
+
+    ResolveCurrentSection = CLng(Val(SlideTag(tocSlide, TAG_CURRENT_SECTION)))
+End Function
+
 Private Function IsMajorNavigationCode(ByVal navigationCode As String) As Boolean
     IsMajorNavigationCode = (navigationCode = CStr(CLng(Val(navigationCode))))
 End Function
@@ -315,6 +344,16 @@ Private Function FindConfigSlide(ByVal pres As Presentation) As Slide
     Next sld
     Set FindConfigSlide = Nothing
 End Function
+
+Private Sub SetDisplayedVersion(ByVal pres As Presentation)
+    Dim configSlide As Slide
+    Dim versionShape As Shape
+
+    Set configSlide = FindConfigSlide(pres)
+    If configSlide Is Nothing Then Exit Sub
+    Set versionShape = FindNamedShape(configSlide, CFG_VERSION)
+    If Not versionShape Is Nothing Then versionShape.TextFrame.TextRange.Text = NAVIGATION_VERSION
+End Sub
 
 Private Function ConfigText(ByVal configSlide As Slide, ByVal shapeName As String, ByVal defaultValue As String) As String
     Dim valueShape As Shape

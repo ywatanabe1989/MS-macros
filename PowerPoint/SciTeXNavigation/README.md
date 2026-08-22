@@ -2,7 +2,7 @@
 
 `SciTeXNavigation` is a tested VBA module for repeatable slide numbering and full-presentation tables of contents.
 
-Version: **0.1.0**
+Version: **0.1.1**
 
 ## What it does
 
@@ -11,13 +11,14 @@ Version: **0.1.0**
 - Indents child entries such as `1a`, `1b`, and `2a` below their major section.
 - Adds clickable internal links to TOC entries.
 - Re-runs safely without duplicating number prefixes.
+- Recomputes the active section when a TOC slide is copied or moved.
 - Optionally omits hidden slides from the TOC.
 - Applies configurable Latin/CJK fonts and minimum/maximum sizes only to managed navigation shapes.
 - Exposes one public macro, `RunSciTeXNavigation`; implementation helpers stay private.
 
 ## Try the tested sandbox
 
-Open [`dist/SciTeXNavigationSandbox_v0.1.0.pptm`](./dist/SciTeXNavigationSandbox_v0.1.0.pptm), enable macros, then run `RunSciTeXNavigation` from `Alt+F8`. The last slide is the hidden English configuration page.
+Open [`dist/SciTeXNavigationSandbox_v0.1.1.pptm`](./dist/SciTeXNavigationSandbox_v0.1.1.pptm), enable macros, then run `RunSciTeXNavigation` from `Alt+F8`. The last slide is the hidden English configuration page.
 
 ## Configuration
 
@@ -47,7 +48,7 @@ The generic mode uses these slide tags and shape names:
 For decks whose numbering does not follow slide order, explicit mode adds:
 
 - `SCITEX_NAV_CODE`: fixed code such as `3`, `3a`, or `4f`.
-- `SCITEX_CURRENT_SECTION`: major section emphasized on a TOC slide.
+- `SCITEX_CURRENT_SECTION`: cached major section; the macro refreshes it from the TOC slide's position.
 - `SCITEX_TOC_SPLIT_AFTER`: last major section placed in the left column.
 - `SCITEX_TOC_BODY_LEFT` and `SCITEX_TOC_BODY_RIGHT`: two-column TOC shapes.
 
