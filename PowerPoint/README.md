@@ -4,6 +4,12 @@ This directory contains VBA macros for Microsoft PowerPoint.
 
 ## Available Macros
 
+### SciTeX Navigation
+
+The versioned [`SciTeXNavigation`](./SciTeXNavigation) toolkit builds a complete clickable TOC on every section page, dims inactive sections, indents child entries, and supports an English configuration slide. A tested `.pptm` sandbox is included.
+
+### General macros
+
 1. SetDefaultColors
    Sets a predefined color scheme for the active presentation.
    Usage: Run the macro to apply the color scheme.
@@ -16,13 +22,13 @@ This directory contains VBA macros for Microsoft PowerPoint.
    Returns RGB color values by name.
    Usage: color = GetRGBColor("blue")
 
-For detailed implementation, see [PowerPointMacros.vba](./PowerPointMacros.vba).
+For detailed implementation, see [`macros.vba`](./macros.vba).
 
 ## Setup Instructions
 
 1. Open PowerPoint and press Alt+F11 to open the Visual Basic Editor.
 2. In the Project Explorer, right-click on your presentation and select Insert > Module.
-3. Copy and paste the code from PowerPointMacros.vba into the new module.
+3. Copy and paste the code from `macros.vba` into the new module.
 4. Save the presentation as a .pptm file (PowerPoint Macro-Enabled Presentation).
 
 ## Usage
