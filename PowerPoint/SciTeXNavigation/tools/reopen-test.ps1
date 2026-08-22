@@ -75,10 +75,10 @@ try {
     Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
 
     Assert-Equal $presentation.Slides.Count 7 "slide count after fresh reopen and second run"
-    Assert-Equal (Get-NamedShape $presentation.Slides.Item(2) "SCITEX_TITLE").TextFrame.TextRange.Text "1. Company Overview" "reopened section 1 title"
+    Assert-Equal (Get-NamedShape $presentation.Slides.Item(2) "SCITEX_TITLE").TextFrame.TextRange.Text "Company Overview" "reopened section 1 TOC title"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(3) "SCITEX_TITLE").TextFrame.TextRange.Text "1a. Company Profile" "idempotent child numbering"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(4) "SCITEX_TITLE").TextFrame.TextRange.Text "1b. Problem and Solution" "idempotent second child numbering"
-    Assert-Equal (Get-NamedShape $presentation.Slides.Item(5) "SCITEX_TITLE").TextFrame.TextRange.Text "2. Product" "reopened section 2 title"
+    Assert-Equal (Get-NamedShape $presentation.Slides.Item(5) "SCITEX_TITLE").TextFrame.TextRange.Text "Product" "reopened section 2 TOC title"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(6) "SCITEX_TITLE").TextFrame.TextRange.Text "2a. SciTeX Platform" "reopened section 2 child title"
     $fullToc = "1. Company Overview`r1a. Company Profile`r1b. Problem and Solution`r2. Product`r2a. SciTeX Platform"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(2) "SCITEX_TOC_BODY").TextFrame.TextRange.Text $fullToc "reopened section 1 full TOC"
@@ -97,7 +97,7 @@ try {
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_FONT_MIN").TextFrame.TextRange.Text "18" "reopened minimum font size configuration"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_FONT_MAX").TextFrame.TextRange.Text "32" "reopened maximum font size configuration"
     Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_HIDE_HIDDEN").TextFrame.TextRange.Text "Yes" "reopened hidden-slide configuration"
-    Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_VERSION").TextFrame.TextRange.Text "0.1.1" "reopened configuration version"
+    Assert-Equal (Get-NamedShape $presentation.Slides.Item(7) "SCITEX_CFG_VERSION").TextFrame.TextRange.Text "0.1.2" "reopened configuration version"
     $configText = ""
     foreach ($shape in $presentation.Slides.Item(7).Shapes) {
         if ($shape.HasTextFrame -eq -1 -and $shape.TextFrame.HasText -eq -1) {
@@ -109,9 +109,14 @@ try {
     $expectedTargetSlides = @(2, 3, 4, 5, 6)
     foreach ($tocSlideIndex in @(2, 5)) {
         $tocBody = Get-NamedShape $presentation.Slides.Item($tocSlideIndex) "SCITEX_TOC_BODY"
+        $tocTitle = Get-NamedShape $presentation.Slides.Item($tocSlideIndex) "SCITEX_TITLE"
+        Assert-True ($tocTitle.TextFrame.TextRange.BoundWidth -le $tocTitle.Width + 0.5) "reopened TOC slide $tocSlideIndex title fits its header box"
+        Assert-True ($tocTitle.TextFrame.TextRange.Font.Size -ge 18 -and $tocTitle.TextFrame.TextRange.Font.Size -le 32) "reopened TOC slide $tocSlideIndex title size bounds"
         for ($lineIndex = 1; $lineIndex -le $expectedTargetSlides.Count; $lineIndex++) {
-            $link = $tocBody.TextFrame.TextRange.Paragraphs($lineIndex, 1).Characters(1, 1).ActionSettings.Item(1)
-            Assert-Equal $link.Action 7 "reopened TOC slide $tocSlideIndex line $lineIndex hyperlink action"
+            $textAction = $tocBody.TextFrame.TextRange.Paragraphs($lineIndex, 1).Characters(1, 1).ActionSettings.Item(1)
+            Assert-Equal $textAction.Action 0 "reopened TOC slide $tocSlideIndex line $lineIndex text has no hyperlink styling"
+            $link = $presentation.Slides.Item($tocSlideIndex).Shapes.Item("SCITEX_TOC_LINK_B_$lineIndex").ActionSettings.Item(1)
+            Assert-Equal $link.Action 7 "reopened TOC slide $tocSlideIndex line $lineIndex overlay hyperlink action"
             Assert-True ($link.Hyperlink.SubAddress -match ",$($expectedTargetSlides[$lineIndex - 1]),") "reopened TOC slide $tocSlideIndex line $lineIndex target"
         }
         Assert-Equal $tocBody.TextFrame.TextRange.Paragraphs(1, 1).IndentLevel 1 "reopened TOC slide $tocSlideIndex section 1 indent level"
@@ -119,6 +124,10 @@ try {
         Assert-Equal $tocBody.TextFrame.TextRange.Paragraphs(3, 1).IndentLevel 2 "reopened TOC slide $tocSlideIndex child 1b indent level"
         Assert-Equal $tocBody.TextFrame.TextRange.Paragraphs(4, 1).IndentLevel 1 "reopened TOC slide $tocSlideIndex section 2 indent level"
         Assert-Equal $tocBody.TextFrame.TextRange.Paragraphs(5, 1).IndentLevel 2 "reopened TOC slide $tocSlideIndex child 2a indent level"
+        Assert-Equal $tocBody.TextFrame.TextRange.Paragraphs(1, 1).Characters(1, 1).Font.Underline -1 "reopened TOC slide $tocSlideIndex section 1 heading underlined"
+        Assert-Equal $tocBody.TextFrame.TextRange.Paragraphs(2, 1).Characters(1, 1).Font.Underline 0 "reopened TOC slide $tocSlideIndex child 1a not underlined"
+        Assert-Equal $tocBody.TextFrame.TextRange.Paragraphs(4, 1).Characters(1, 1).Font.Underline -1 "reopened TOC slide $tocSlideIndex section 2 heading underlined"
+        Assert-Equal $tocBody.TextFrame.TextRange.Paragraphs(5, 1).Characters(1, 1).Font.Underline 0 "reopened TOC slide $tocSlideIndex child 2a not underlined"
     }
 
     $hiddenToc = "1. Company Overview`r1a. Company Profile`r2. Product`r2a. SciTeX Platform"
@@ -163,11 +172,12 @@ try {
         current_section_emphasis = "passed"
         all_other_sections_dimmed = "passed"
         hierarchical_indentation = "passed"
+        toc_title_fit = "passed"
         typography_configuration = "passed"
         font_size_bounds = "passed"
         hidden_slide_toc_toggle = "passed"
         english_only_configuration_page = "passed"
-        version = "0.1.1"
+        version = "0.1.2"
         settings_slide_hidden = "passed"
         public_macro_count = $publicSubCount
     }

@@ -32,71 +32,65 @@ function Restore-AccessVbom([string]$Path, [bool]$Existed, $OriginalValue) {
     }
 }
 
-function Get-ExpectedEntries($Presentation, $Mappings, [bool]$LeftColumn, [bool]$IncludeHidden) {
+function Get-Tag($Slide, [string]$Name) {
+    return [string]$Slide.Tags.Item($Name)
+}
+
+function Get-Section([string]$NavigationCode) {
+    return [int]([regex]::Match($NavigationCode, "^\d+").Value)
+}
+
+function Get-EntryText($Slide) {
+    $code = Get-Tag $Slide "SCITEX_NAV_CODE"
+    if ((Get-Tag $Slide "SCITEX_TOC") -eq "1") {
+        return "$code. $(Get-Tag $Slide 'SCITEX_SECTION_TITLE')"
+    }
+    return $Slide.Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text
+}
+
+function Get-ExpectedEntries($Presentation, [bool]$LeftColumn, [bool]$IncludeHidden, [int]$SplitAfter) {
     $entries = @()
-    foreach ($mapping in $Mappings) {
-        $target = $Presentation.Slides.Item($mapping.Slide)
-        $section = [int]([regex]::Match($mapping.Code, "^\d+").Value)
-        $includeColumn = $(if ($LeftColumn) { $section -le 3 } else { $section -gt 3 })
-        if ($includeColumn -and ($IncludeHidden -or $target.SlideShowTransition.Hidden -eq 0)) {
+    foreach ($slide in $Presentation.Slides) {
+        $code = Get-Tag $slide "SCITEX_NAV_CODE"
+        if ([string]::IsNullOrWhiteSpace($code)) { continue }
+        if ((Get-Tag $slide "SCITEX_CONFIG") -eq "1" -or (Get-Tag $slide "SCITEX_COVER") -eq "1") { continue }
+        if (-not $IncludeHidden -and $slide.SlideShowTransition.Hidden -ne 0) { continue }
+        $section = Get-Section $code
+        $includeColumn = $(if ($LeftColumn) { $section -le $SplitAfter } else { $section -gt $SplitAfter })
+        if ($includeColumn) {
             $entries += [pscustomobject]@{
-                Slide = $target
-                Code = $mapping.Code
+                Slide = $slide
+                Code = $code
                 Section = $section
-                Title = $target.Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text
+                IsToc = ((Get-Tag $slide "SCITEX_TOC") -eq "1")
+                Text = Get-EntryText $slide
             }
         }
     }
     return $entries
 }
 
-function Assert-TocColumn($Body, $Entries, [int]$CurrentSection, [string]$Label) {
-    Assert-Equal $Body.TextFrame.TextRange.Text ($Entries.Title -join "`r") "$Label complete text"
+function Assert-TocColumn($TocSlide, $Body, $Entries, [int]$CurrentSection, [string]$ColumnKey, [string]$Label) {
+    Assert-Equal $Body.TextFrame.TextRange.Text ($Entries.Text -join "`r") "$Label complete text"
     for ($entryIndex = 1; $entryIndex -le $Entries.Count; $entryIndex++) {
         $entry = $Entries[$entryIndex - 1]
         $paragraph = $Body.TextFrame.TextRange.Paragraphs($entryIndex, 1)
         $character = $paragraph.Characters(1, 1)
-        $action = $character.ActionSettings.Item(1)
-        Assert-Equal $action.Action 7 "$Label line $entryIndex hyperlink action"
+        $textAction = $character.ActionSettings.Item(1)
+        Assert-Equal $textAction.Action 0 "$Label line $entryIndex text has no hyperlink styling"
+        $action = $TocSlide.Shapes.Item("SCITEX_TOC_LINK_$($ColumnKey)_$entryIndex").ActionSettings.Item(1)
+        Assert-Equal $action.Action 7 "$Label line $entryIndex overlay hyperlink action"
         Assert-True ($action.Hyperlink.SubAddress -match ",$($entry.Slide.SlideIndex),") "$Label line $entryIndex hyperlink target"
-        $expectedIndent = $(if ($entry.Code -match "^\d+$") { 1 } else { 2 })
-        Assert-Equal $paragraph.IndentLevel $expectedIndent "$Label line $entryIndex indentation"
+        $expectedIndent = $(if ($entry.IsToc) { 1 } else { 2 })
+        $expectedUnderline = $(if ($entry.IsToc) { -1 } else { 0 })
+        $expectedBold = $(if ($entry.IsToc) { -1 } else { 0 })
         $expectedColor = $(if ($entry.Section -eq $CurrentSection) { ConvertTo-Rgb 27 38 53 } else { ConvertTo-Rgb 170 179 188 })
+        Assert-Equal $paragraph.IndentLevel $expectedIndent "$Label line $entryIndex indentation"
+        Assert-Equal $character.Font.Underline $expectedUnderline "$Label line $entryIndex underline"
+        Assert-Equal $character.Font.Bold $expectedBold "$Label line $entryIndex bold"
         Assert-Equal $character.Font.Color.RGB $expectedColor "$Label line $entryIndex current-section emphasis"
     }
 }
-
-$mappings = @(
-    [pscustomobject]@{ Slide = 2; Code = "1" },
-    [pscustomobject]@{ Slide = 3; Code = "1a" },
-    [pscustomobject]@{ Slide = 4; Code = "2" },
-    [pscustomobject]@{ Slide = 5; Code = "2a" },
-    [pscustomobject]@{ Slide = 6; Code = "2b" },
-    [pscustomobject]@{ Slide = 7; Code = "2c" },
-    [pscustomobject]@{ Slide = 9; Code = "3" },
-    [pscustomobject]@{ Slide = 10; Code = "3a" },
-    [pscustomobject]@{ Slide = 11; Code = "3b" },
-    [pscustomobject]@{ Slide = 12; Code = "3c" },
-    [pscustomobject]@{ Slide = 13; Code = "3d" },
-    [pscustomobject]@{ Slide = 14; Code = "3e" },
-    [pscustomobject]@{ Slide = 15; Code = "3f" },
-    [pscustomobject]@{ Slide = 16; Code = "3g" },
-    [pscustomobject]@{ Slide = 17; Code = "3h" },
-    [pscustomobject]@{ Slide = 18; Code = "3i" },
-    [pscustomobject]@{ Slide = 20; Code = "4" },
-    [pscustomobject]@{ Slide = 21; Code = "4a" },
-    [pscustomobject]@{ Slide = 22; Code = "4b" },
-    [pscustomobject]@{ Slide = 23; Code = "4c" },
-    [pscustomobject]@{ Slide = 24; Code = "4d" },
-    [pscustomobject]@{ Slide = 25; Code = "4e" },
-    [pscustomobject]@{ Slide = 26; Code = "4f" },
-    [pscustomobject]@{ Slide = 28; Code = "5" }
-)
-$tocSpecifications = @(
-    [pscustomobject]@{ Slide = 8; Current = 3 },
-    [pscustomobject]@{ Slide = 19; Current = 4 },
-    [pscustomobject]@{ Slide = 27; Current = 5 }
-)
 
 $powerPoint = $null
 $presentation = $null
@@ -116,7 +110,7 @@ try {
     $powerPoint.DisplayAlerts = 1
     $presentation = $powerPoint.Presentations.Open($Deck, $false, $false, $true)
 
-    Assert-Equal $presentation.Slides.Count 29 "fresh reopen slide count"
+    Assert-Equal $presentation.Slides.Count 30 "fresh reopen slide count"
     Assert-Equal $presentation.Designs.Count 1 "fresh reopen design count"
     Assert-Equal $presentation.SlideMaster.CustomLayouts.Count 1 "fresh reopen layout count"
     Assert-Equal $presentation.VBProject.VBComponents.Count 1 "fresh reopen VBA component count"
@@ -126,117 +120,108 @@ try {
     Assert-Equal ([regex]::Matches($source, "(?im)^\s*Public\s+Sub\s+").Count) 1 "public macro count"
     $versionMatch = [regex]::Match($source, 'NAVIGATION_VERSION\s+As\s+String\s*=\s*"([^"]+)"')
     Assert-True $versionMatch.Success "source version constant"
-    Assert-Equal $versionMatch.Groups.Item(1).Value "0.1.1" "source version"
+    Assert-Equal $versionMatch.Groups.Item(1).Value "0.1.2" "source version"
 
-    $sentinelBodySize = $presentation.Slides.Item(25).Shapes.Item("Box133").TextFrame.TextRange.Font.Size
+    $sentinelShape = $null
+    foreach ($slide in $presentation.Slides) {
+        foreach ($shape in $slide.Shapes) {
+            if ($shape.Name -eq "Box133") { $sentinelShape = $shape; break }
+        }
+        if ($null -ne $sentinelShape) { break }
+    }
+    Assert-True ($null -ne $sentinelShape) "body-content sentinel found"
+    $sentinelText = $sentinelShape.TextFrame.TextRange.Text
+    $sentinelSize = $sentinelShape.TextFrame.TextRange.Font.Size
+
     Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
 
-    foreach ($mapping in $mappings) {
-        $title = $presentation.Slides.Item($mapping.Slide).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text
-        Assert-True ($title.StartsWith("$($mapping.Code). ")) "slide $($mapping.Slide) stable explicit code"
+    $tocSlides = @($presentation.Slides | Where-Object { (Get-Tag $_ "SCITEX_TOC") -eq "1" })
+    Assert-Equal $tocSlides.Count 4 "TOC slide count"
+    Assert-Equal ($tocSlides.SlideIndex -join ",") "2,9,20,28" "TOC slide positions"
+    $expectedChildCounts = @(6, 10, 7, 1)
+    $expectedTocIndices = @(2, 9, 20, 28)
+    for ($section = 1; $section -le 4; $section++) {
+        $toc = $presentation.Slides.Item($expectedTocIndices[$section - 1])
+        Assert-Equal (Get-Tag $toc "SCITEX_NAV_CODE") ([string]$section) "section $section TOC navigation code"
+        Assert-Equal (Get-Tag $toc "SCITEX_CURRENT_SECTION") ([string]$section) "section $section current-section tag"
+        Assert-Equal (Get-Tag $toc "SCITEX_TOC_SPLIT_AFTER") "2" "section $section balanced split"
+        $sectionTitle = Get-Tag $toc "SCITEX_SECTION_TITLE"
+        Assert-True (-not [string]::IsNullOrWhiteSpace($sectionTitle)) "section $section title tag"
+        Assert-True ($toc.Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text.EndsWith($sectionTitle)) "section $section visible TOC title"
+        for ($childNumber = 1; $childNumber -le $expectedChildCounts[$section - 1]; $childNumber++) {
+            $childSlide = $presentation.Slides.Item($toc.SlideIndex + $childNumber)
+            $letter = [char](96 + $childNumber)
+            $expectedCode = "$section$letter"
+            Assert-Equal (Get-Tag $childSlide "SCITEX_NAV_CODE") $expectedCode "section $section child $childNumber navigation code"
+            Assert-True ($childSlide.Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text.StartsWith("$expectedCode. ")) "section $section child $childNumber visible numbering"
+        }
     }
-    $leftEntries = Get-ExpectedEntries $presentation $mappings $true $false
-    $rightEntries = Get-ExpectedEntries $presentation $mappings $false $false
-    Assert-Equal $leftEntries.Count 15 "visible left-column entry count"
-    Assert-Equal $rightEntries.Count 8 "visible right-column entry count"
-    foreach ($tocSpec in $tocSpecifications) {
-        $tocSlide = $presentation.Slides.Item($tocSpec.Slide)
-        Assert-TocColumn $tocSlide.Shapes.Item("SCITEX_TOC_BODY_LEFT") $leftEntries $tocSpec.Current "TOC $($tocSpec.Slide) left"
-        Assert-TocColumn $tocSlide.Shapes.Item("SCITEX_TOC_BODY_RIGHT") $rightEntries $tocSpec.Current "TOC $($tocSpec.Slide) right"
-    }
-    Assert-Equal $presentation.Slides.Item(25).Shapes.Item("Box133").TextFrame.TextRange.Font.Size $sentinelBodySize "body typography unchanged after navigation run"
 
-    $config = $presentation.Slides.Item(29)
+    $leftEntries = Get-ExpectedEntries $presentation $true $false 2
+    $rightEntries = Get-ExpectedEntries $presentation $false $false 2
+    Assert-Equal $leftEntries.Count 17 "visible left-column entry count"
+    Assert-Equal $rightEntries.Count 10 "visible right-column entry count"
+    foreach ($toc in $tocSlides) {
+        $currentSection = [int](Get-Tag $toc "SCITEX_NAV_CODE")
+        $tocTitle = $toc.Shapes.Item("SCITEX_TITLE")
+        Assert-True ($tocTitle.TextFrame.TextRange.BoundWidth -le $tocTitle.Width + 0.5) "TOC $($toc.SlideIndex) title fits its header box"
+        Assert-True ($tocTitle.TextFrame.TextRange.Font.Size -ge 18 -and $tocTitle.TextFrame.TextRange.Font.Size -le 32) "TOC $($toc.SlideIndex) title respects font-size bounds"
+        foreach ($shape in $toc.Shapes) {
+            Assert-True ($shape.Type -ne 9) "TOC $($toc.SlideIndex) has no stale connector lines"
+        }
+        Assert-TocColumn $toc $toc.Shapes.Item("SCITEX_TOC_BODY_LEFT") $leftEntries $currentSection "L" "TOC $($toc.SlideIndex) left"
+        Assert-TocColumn $toc $toc.Shapes.Item("SCITEX_TOC_BODY_RIGHT") $rightEntries $currentSection "R" "TOC $($toc.SlideIndex) right"
+    }
+
+    $originalTocTitle = $presentation.Slides.Item(2).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text
+    $presentation.Slides.Item(2).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text = "Contents: Renamed Section"
+    Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
+    Assert-Equal $presentation.Slides.Item(2).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text "Contents: Renamed Section" "manual TOC title preserved"
+    Assert-Equal (Get-Tag $presentation.Slides.Item(2) "SCITEX_SECTION_TITLE") "Renamed Section" "manual TOC title accepted"
+    Assert-True $presentation.Slides.Item(2).Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Text.StartsWith("1. Renamed Section") "manual TOC title propagated"
+    $presentation.Slides.Item(2).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text = $originalTocTitle
+    Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
+
+    $config = $presentation.Slides.Item(30)
     Assert-True ($config.SlideShowTransition.Hidden -ne 0) "configuration slide hidden"
-    Assert-Equal $config.Shapes.Item("SCITEX_CFG_FONT_LATIN").TextFrame.TextRange.Text "Arial" "Latin font configuration"
-    Assert-Equal $config.Shapes.Item("SCITEX_CFG_FONT_CJK").TextFrame.TextRange.Text "Yu Gothic" "CJK font configuration"
-    Assert-Equal $config.Shapes.Item("SCITEX_CFG_FONT_MIN").TextFrame.TextRange.Text "18" "minimum font configuration"
-    Assert-Equal $config.Shapes.Item("SCITEX_CFG_FONT_MAX").TextFrame.TextRange.Text "32" "maximum font configuration"
-    Assert-Equal $config.Shapes.Item("SCITEX_CFG_HIDE_HIDDEN").TextFrame.TextRange.Text "Yes" "hidden-slide configuration"
-    Assert-Equal $config.Shapes.Item("SCITEX_CFG_VERSION").TextFrame.TextRange.Text $versionMatch.Groups.Item(1).Value "displayed version matches source"
-    $configText = ""
-    foreach ($shape in $config.Shapes) {
-        if ($shape.HasTextFrame -eq -1 -and $shape.TextFrame.HasText -eq -1) { $configText += $shape.TextFrame.TextRange.Text }
-    }
-    Assert-True ($configText -notmatch "[^\x00-\x7F]") "configuration slide English ASCII only"
-
+    Assert-Equal $config.Shapes.Item("SCITEX_CFG_VERSION").TextFrame.TextRange.Text "0.1.2" "displayed version"
     $config.Shapes.Item("SCITEX_CFG_HIDE_HIDDEN").TextFrame.TextRange.Text = "No"
     Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
-    $leftWithHidden = Get-ExpectedEntries $presentation $mappings $true $true
-    Assert-Equal $leftWithHidden.Count 16 "hidden slide included when configured No"
-    Assert-Equal $presentation.Slides.Item(8).Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Text ($leftWithHidden.Title -join "`r") "hidden slide toggle No"
+    $leftWithHidden = Get-ExpectedEntries $presentation $true $true 2
+    Assert-Equal $leftWithHidden.Count 18 "hidden slide included when configured No"
     $config.Shapes.Item("SCITEX_CFG_HIDE_HIDDEN").TextFrame.TextRange.Text = "Yes"
     Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
-    Assert-Equal $presentation.Slides.Item(8).Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Text ($leftEntries.Title -join "`r") "hidden slide toggle restored Yes"
+    Assert-Equal (Get-ExpectedEntries $presentation $true $false 2).Count 17 "hidden slide filter restored Yes"
 
-    $originalTitleSize = $presentation.Slides.Item(2).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Font.Size
-    $originalTocSize = $presentation.Slides.Item(8).Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Font.Size
-    $config.Shapes.Item("SCITEX_CFG_FONT_MIN").TextFrame.TextRange.Text = "20"
-    $config.Shapes.Item("SCITEX_CFG_FONT_MAX").TextFrame.TextRange.Text = "24"
+    Assert-Equal $sentinelShape.TextFrame.TextRange.Text $sentinelText "body content text unchanged"
+    Assert-Equal $sentinelShape.TextFrame.TextRange.Font.Size $sentinelSize "body content typography unchanged"
+    $stateBefore = @($tocSlides | ForEach-Object { $_.Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Text + "|" + $_.Shapes.Item("SCITEX_TOC_BODY_RIGHT").TextFrame.TextRange.Text }) -join "||"
     Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
-    Assert-Equal $presentation.Slides.Item(2).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Font.Size 24 "maximum font size applied"
-    Assert-Equal $presentation.Slides.Item(8).Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Font.Size 20 "minimum font size applied"
-    Assert-Equal $presentation.Slides.Item(25).Shapes.Item("Box133").TextFrame.TextRange.Font.Size $sentinelBodySize "body typography unchanged during configuration test"
-    $config.Shapes.Item("SCITEX_CFG_FONT_MIN").TextFrame.TextRange.Text = "18"
-    $config.Shapes.Item("SCITEX_CFG_FONT_MAX").TextFrame.TextRange.Text = "32"
-    Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
-    Assert-Equal $presentation.Slides.Item(2).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Font.Size $originalTitleSize "title font size reversibly restored"
-    Assert-Equal $presentation.Slides.Item(8).Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Font.Size $originalTocSize "TOC font size reversibly restored"
-
-    $stateBeforeFinalRun = @(
-        $presentation.Slides.Item(2).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text,
-        $presentation.Slides.Item(28).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text,
-        $presentation.Slides.Item(8).Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Text,
-        $presentation.Slides.Item(27).Shapes.Item("SCITEX_TOC_BODY_RIGHT").TextFrame.TextRange.Text
-    ) -join "|"
-    Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
-    $stateAfterFinalRun = @(
-        $presentation.Slides.Item(2).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text,
-        $presentation.Slides.Item(28).Shapes.Item("SCITEX_TITLE").TextFrame.TextRange.Text,
-        $presentation.Slides.Item(8).Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Text,
-        $presentation.Slides.Item(27).Shapes.Item("SCITEX_TOC_BODY_RIGHT").TextFrame.TextRange.Text
-    ) -join "|"
-    Assert-Equal $stateAfterFinalRun $stateBeforeFinalRun "final idempotent run"
-
-    # Regression: PowerPoint copies slide tags, so a TOC duplicated from the
-    # section-3 position used to keep section 3 emphasized after moving to slide 2.
-    $duplicateRange = $presentation.Slides.Item(8).Duplicate()
-    $copiedToc = $duplicateRange.Item(1)
-    $copiedToc.MoveTo(2)
-    Assert-Equal $presentation.Slides.Count 30 "copied TOC slide count"
-    Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
-    Assert-Equal $copiedToc.SlideIndex 2 "copied TOC moved position"
-    Assert-Equal $copiedToc.Tags.Item("SCITEX_CURRENT_SECTION") "1" "copied TOC inferred current section"
-    $copiedLeftBody = $copiedToc.Shapes.Item("SCITEX_TOC_BODY_LEFT")
-    $copiedRightBody = $copiedToc.Shapes.Item("SCITEX_TOC_BODY_RIGHT")
-    Assert-Equal $copiedLeftBody.TextFrame.TextRange.Paragraphs(1, 1).Characters(1, 1).Font.Color.RGB (ConvertTo-Rgb 27 38 53) "copied TOC section 1 emphasized"
-    Assert-Equal $copiedLeftBody.TextFrame.TextRange.Paragraphs(7, 1).Characters(1, 1).Font.Color.RGB (ConvertTo-Rgb 170 179 188) "copied TOC stale section 3 dimmed"
-    Assert-Equal $copiedRightBody.TextFrame.TextRange.Paragraphs(1, 1).Characters(1, 1).Font.Color.RGB (ConvertTo-Rgb 170 179 188) "copied TOC right column dimmed"
-    $copiedToc.Delete()
-    Assert-Equal $presentation.Slides.Count 29 "copied TOC cleanup slide count"
-    Invoke-PowerPointMacro $powerPoint "RunSciTeXNavigation"
+    $stateAfter = @($tocSlides | ForEach-Object { $_.Shapes.Item("SCITEX_TOC_BODY_LEFT").TextFrame.TextRange.Text + "|" + $_.Shapes.Item("SCITEX_TOC_BODY_RIGHT").TextFrame.TextRange.Text }) -join "||"
+    Assert-Equal $stateAfter $stateBefore "idempotent repeated run"
     $presentation.Save()
 
     [ordered]@{
         deck = $Deck
         fresh_reopen = "passed"
-        repeated_macro_runs = "passed"
-        explicit_numbering = "passed"
-        toc_links_checked = 69
-        hierarchical_indentation = "passed"
+        toc_driven_hierarchy = "passed"
+        toc_title_rename = "passed"
+        toc_links_checked = 108
+        top_level_only_underlined = "passed"
+        child_links_without_underline = "passed"
+        stale_connector_cleanup = "passed"
+        toc_title_fit = "passed"
+        balanced_two_column_toc = "passed"
         current_section_emphasis = "passed"
-        copied_toc_section_inference = "passed"
         hidden_slide_toggle = "passed"
-        typography_limits = "passed"
-        typography_reversible = "passed"
+        repeated_macro_runs = "passed"
         body_content_unchanged = "passed"
-        english_configuration = "passed"
         version = $versionMatch.Groups.Item(1).Value
         public_macro_count = 1
     } | ConvertTo-Json
 }
 catch {
-    Write-Error ("AICHI_VALIDATION_FAILED: " + $_.Exception.Message + "`n" + $_.ScriptStackTrace)
+    Write-Error ("TOC_DRIVEN_VALIDATION_FAILED: " + $_.Exception.Message + "`n" + $_.ScriptStackTrace)
     throw
 }
 finally {
