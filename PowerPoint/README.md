@@ -4,6 +4,17 @@ This directory contains VBA macros for Microsoft PowerPoint.
 
 ## Available Macros
 
+### MACROS.pptm
+
+[`MACROS.pptm`](./MACROS.pptm) is the working macro container: keep it open next
+to the presentation you are editing and run its macros against that
+presentation. The deck itself then does not need to be a `.pptm`, which avoids
+both of Office's macro traps — a `.pptx` cannot hold macros at all, and macros in
+a file opened from a network path are disabled outright.
+
+Its VBA source is exported module by module under
+[`MACROS/`](./MACROS) so the code is readable and diffable here.
+
 ### SciTeX Navigation
 
 The versioned [`SciTeXNavigation`](./SciTeXNavigation) toolkit builds a complete clickable TOC on every section page, dims inactive sections, indents child entries, and supports an English configuration slide. A tested `.pptm` sandbox is included.
