@@ -1,0 +1,699 @@
+Option Explicit
+
+Private Const NAVIGATION_VERSION As String = "0.1.2"
+Private Const TAG_CONFIG As String = "SCITEX_CONFIG"
+Private Const TAG_COVER As String = "SCITEX_COVER"
+Private Const TAG_TOC As String = "SCITEX_TOC"
+Private Const TAG_SECTION_TITLE As String = "SCITEX_SECTION_TITLE"
+Private Const TAG_NAV_CODE As String = "SCITEX_NAV_CODE"
+Private Const TAG_CURRENT_SECTION As String = "SCITEX_CURRENT_SECTION"
+Private Const TAG_TOC_SPLIT_AFTER As String = "SCITEX_TOC_SPLIT_AFTER"
+Private Const TITLE_SHAPE As String = "SCITEX_TITLE"
+Private Const TOC_BODY_SHAPE As String = "SCITEX_TOC_BODY"
+Private Const TOC_BODY_LEFT As String = "SCITEX_TOC_BODY_LEFT"
+Private Const TOC_BODY_RIGHT As String = "SCITEX_TOC_BODY_RIGHT"
+Private Const TOC_LINK_PREFIX As String = "SCITEX_TOC_LINK_"
+Private Const STATUS_SHAPE As String = "SCITEX_STATUS"
+Private Const CFG_FONT_LATIN As String = "SCITEX_CFG_FONT_LATIN"
+Private Const CFG_FONT_CJK As String = "SCITEX_CFG_FONT_CJK"
+Private Const CFG_FONT_MIN As String = "SCITEX_CFG_FONT_MIN"
+Private Const CFG_FONT_MAX As String = "SCITEX_CFG_FONT_MAX"
+Private Const CFG_HIDE_HIDDEN As String = "SCITEX_CFG_HIDE_HIDDEN"
+Private Const CFG_VERSION As String = "SCITEX_CFG_VERSION"
+Private Const TAG_ORIGINAL_FONT_SIZE As String = "SCITEX_ORIGINAL_FONT_SIZE"
+
+Private mFontLatin As String
+Private mFontCjk As String
+Private mFontMin As Single
+Private mFontMax As Single
+Private mHideHiddenFromToc As Boolean
+Private mTwoColumnToc As Boolean
+
+' This is the only public macro. All implementation details stay out of Alt+F8.
+Public Sub RunSciTeXNavigation()
+    On Error GoTo Failed
+
+    Dim pres As Presentation
+    Dim sld As Slide
+    Dim sectionNumber As Long
+
+    Set pres = ActivePresentation
+    LoadConfiguration pres
+    SetDisplayedVersion pres
+    mTwoColumnToc = HasTwoColumnToc(pres)
+    sectionNumber = RenumberTocDrivenSlides(pres)
+
+    ' Apply font configuration before rebuilding links so TOC styling wins.
+    ApplyTypography pres
+    FitTocTitles pres
+
+    ' Every TOC slide shows the complete presentation outline.
+    For Each sld In pres.Slides
+        If IsTocSlide(sld) Then RebuildFullToc pres, sld
+    Next sld
+
+    SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & CStr(sectionNumber) & " sections"
+    Exit Sub
+
+Failed:
+    SetStatus ActivePresentation, "Navigation error " & CStr(Err.number) & ": " & Err.Description
+    Err.Raise Err.number, "RunSciTeXNavigation", Err.Description
+End Sub
+
+Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
+    Dim body As Shape
+    Dim target As Slide
+    Dim targetIndex As Long
+    Dim lineNumber As Long
+    Dim tocText As String
+    Dim titleText As String
+    Dim paragraphRange As textRange
+    Dim linkRange As textRange
+    Dim linkLength As Long
+    Dim currentSection As Long
+    Dim targetSection As Long
+    Dim leftBody As Shape
+    Dim rightBody As Shape
+
+    DeleteTocLinkOverlays tocSlide
+
+    If mTwoColumnToc Then
+        Set leftBody = FindNamedShape(tocSlide, TOC_BODY_LEFT)
+        Set rightBody = FindNamedShape(tocSlide, TOC_BODY_RIGHT)
+        If leftBody Is Nothing Or rightBody Is Nothing Then Err.Raise vbObjectError + 2100, , "Two-column TOC requires left and right body shapes."
+        currentSection = CLng(Val(SlideTag(tocSlide, TAG_NAV_CODE)))
+        RebuildTocColumn pres, tocSlide, leftBody, True, currentSection
+        RebuildTocColumn pres, tocSlide, rightBody, False, currentSection
+        Exit Sub
+    End If
+
+    Set body = FindNamedShape(tocSlide, TOC_BODY_SHAPE)
+    If body Is Nothing Then Err.Raise vbObjectError + 2101, , "Missing " & TOC_BODY_SHAPE
+
+    currentSection = CLng(Val(SlideTag(tocSlide, TAG_NAV_CODE)))
+
+    lineNumber = 0
+    tocText = ""
+
+    For targetIndex = 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        If ShouldIncludeInToc(target) Then
+            lineNumber = lineNumber + 1
+            titleText = NavigationEntryText(target)
+            If Len(tocText) > 0 Then tocText = tocText & vbCrLf
+            tocText = tocText & titleText
+        End If
+    Next targetIndex
+
+    body.TextFrame.textRange.text = tocText
+    body.TextFrame.textRange.Font.Bold = msoFalse
+    body.TextFrame.textRange.Font.Underline = msoFalse
+    With body.TextFrame.Ruler.Levels(1)
+        .FirstMargin = 0
+        .LeftMargin = 0
+    End With
+    With body.TextFrame.Ruler.Levels(2)
+        .FirstMargin = 24
+        .LeftMargin = 24
+    End With
+
+    lineNumber = 0
+    For targetIndex = 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        If ShouldIncludeInToc(target) Then
+            targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
+            lineNumber = lineNumber + 1
+            Set paragraphRange = body.TextFrame.textRange.Paragraphs(lineNumber, 1)
+            linkLength = Len(paragraphRange.text)
+            Do While linkLength > 0 And (Mid$(paragraphRange.text, linkLength, 1) = vbCr Or Mid$(paragraphRange.text, linkLength, 1) = vbLf)
+                linkLength = linkLength - 1
+            Loop
+            Set linkRange = paragraphRange.Characters(1, linkLength)
+            ClearTextHyperlink linkRange
+            If targetSection = currentSection Then
+                linkRange.Font.Color.RGB = RGB(27, 38, 53)
+                paragraphRange.Font.Color.RGB = RGB(27, 38, 53)
+            Else
+                linkRange.Font.Color.RGB = RGB(170, 179, 188)
+                paragraphRange.Font.Color.RGB = RGB(170, 179, 188)
+            End If
+            If IsTocSlide(target) Then
+                paragraphRange.IndentLevel = 1
+                paragraphRange.Font.Bold = msoFalse
+                paragraphRange.Font.Underline = msoFalse
+                linkRange.Font.Bold = msoTrue
+                linkRange.Font.Underline = msoTrue
+            Else
+                paragraphRange.IndentLevel = 2
+                linkRange.Font.Bold = msoFalse
+                paragraphRange.Font.Bold = msoFalse
+                linkRange.Font.Underline = msoFalse
+                paragraphRange.Font.Underline = msoFalse
+            End If
+            AddTocLinkOverlay tocSlide, paragraphRange, target, "B", lineNumber
+        End If
+    Next targetIndex
+End Sub
+
+Private Function HasTwoColumnToc(ByVal pres As Presentation) As Boolean
+    Dim sld As Slide
+    Dim leftBody As Shape
+    Dim rightBody As Shape
+
+    For Each sld In pres.Slides
+        If IsTocSlide(sld) Then
+            Set leftBody = FindNamedShape(sld, TOC_BODY_LEFT)
+            Set rightBody = FindNamedShape(sld, TOC_BODY_RIGHT)
+            If Not leftBody Is Nothing And Not rightBody Is Nothing Then
+                HasTwoColumnToc = True
+                Exit Function
+            End If
+        End If
+    Next sld
+    HasTwoColumnToc = False
+End Function
+
+Private Function RenumberTocDrivenSlides(ByVal pres As Presentation) As Long
+    Dim sld As Slide
+    Dim sectionNumber As Long
+    Dim childNumber As Long
+    Dim sectionTitle As String
+    Dim baseTitle As String
+    Dim navigationCode As String
+    Dim splitAfter As Long
+
+    sectionNumber = 0
+    childNumber = 0
+    For Each sld In pres.Slides
+        If Not IsConfigSlide(sld) And Not IsCoverSlide(sld) Then
+            If IsTocSlide(sld) Then
+                sectionNumber = sectionNumber + 1
+                childNumber = 0
+                sectionTitle = ResolveTocSectionTitle(pres, sld)
+                If Len(sectionTitle) = 0 Then Err.Raise vbObjectError + 2113, , "Cannot determine the section title for TOC slide " & CStr(sld.slideIndex) & "."
+                sld.Tags.Add TAG_SECTION_TITLE, sectionTitle
+                sld.Tags.Add TAG_NAV_CODE, CStr(sectionNumber)
+                sld.Tags.Add TAG_CURRENT_SECTION, CStr(sectionNumber)
+                SetTocVisibleTitle sld, sectionTitle
+            ElseIf sectionNumber > 0 Then
+                childNumber = childNumber + 1
+                baseTitle = StripNavigationPrefix(GetSlideTitle(sld))
+                navigationCode = CStr(sectionNumber) & LetterCode(childNumber)
+                SetSlideTitle sld, navigationCode & ". " & baseTitle
+                sld.Tags.Add TAG_NAV_CODE, navigationCode
+            Else
+                DeleteSlideTag sld, TAG_NAV_CODE
+            End If
+        End If
+    Next sld
+
+    splitAfter = (sectionNumber + 1) \ 2
+    For Each sld In pres.Slides
+        If IsTocSlide(sld) Then sld.Tags.Add TAG_TOC_SPLIT_AFTER, CStr(splitAfter)
+    Next sld
+    RenumberTocDrivenSlides = sectionNumber
+End Function
+
+Private Function ResolveTocSectionTitle(ByVal pres As Presentation, ByVal tocSlide As Slide) As String
+    Dim visibleTitle As String
+    Dim parsedTitle As String
+    Dim taggedTitle As String
+
+    visibleTitle = StripNavigationPrefix(GetSlideTitle(tocSlide))
+    parsedTitle = SectionTitleAfterDelimiter(visibleTitle)
+    If Len(parsedTitle) > 0 Then
+        ResolveTocSectionTitle = parsedTitle
+        Exit Function
+    End If
+
+    If Not IsGenericTocLabel(visibleTitle) Then
+        ResolveTocSectionTitle = visibleTitle
+        Exit Function
+    End If
+
+    taggedTitle = SlideTag(tocSlide, TAG_SECTION_TITLE)
+    If Len(taggedTitle) > 0 Then
+        ResolveTocSectionTitle = taggedTitle
+    Else
+        ResolveTocSectionTitle = FirstContentTitleAfterToc(pres, tocSlide)
+    End If
+End Function
+
+Private Function SectionTitleAfterDelimiter(ByVal value As String) As String
+    Dim delimiterPosition As Long
+
+    delimiterPosition = InStrRev(value, ChrW(&HFF1A), -1, vbBinaryCompare)
+    If delimiterPosition = 0 Then delimiterPosition = InStrRev(value, ":", -1, vbBinaryCompare)
+    If delimiterPosition > 0 Then SectionTitleAfterDelimiter = Trim$(Mid$(value, delimiterPosition + 1))
+End Function
+
+Private Function IsGenericTocLabel(ByVal value As String) As Boolean
+    Dim normalized As String
+    Dim japaneseToc As String
+
+    normalized = LCase$(Trim$(value))
+    japaneseToc = ChrW(&H76EE) & ChrW(&H6B21)
+    IsGenericTocLabel = (normalized = "contents" Or normalized = "table of contents" Or normalized = "toc" Or value = japaneseToc)
+End Function
+
+Private Function FirstContentTitleAfterToc(ByVal pres As Presentation, ByVal tocSlide As Slide) As String
+    Dim targetIndex As Long
+    Dim target As Slide
+
+    For targetIndex = tocSlide.slideIndex + 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        If IsTocSlide(target) Then Exit For
+        If Not IsConfigSlide(target) And Not IsCoverSlide(target) Then
+            FirstContentTitleAfterToc = StripNavigationPrefix(GetSlideTitle(target))
+            Exit Function
+        End If
+    Next targetIndex
+End Function
+
+Private Sub SetTocVisibleTitle(ByVal tocSlide As Slide, ByVal sectionTitle As String)
+    Dim visibleTitle As String
+    Dim delimiterPosition As Long
+    Dim prefix As String
+    Dim separatorSpace As String
+    Dim japaneseToc As String
+
+    visibleTitle = StripNavigationPrefix(GetSlideTitle(tocSlide))
+    delimiterPosition = InStrRev(visibleTitle, ChrW(&HFF1A), -1, vbBinaryCompare)
+    If delimiterPosition = 0 Then delimiterPosition = InStrRev(visibleTitle, ":", -1, vbBinaryCompare)
+    If delimiterPosition > 0 Then
+        prefix = Left$(visibleTitle, delimiterPosition)
+        If Mid$(visibleTitle, delimiterPosition + 1, 1) = " " Then separatorSpace = " "
+        SetSlideTitle tocSlide, prefix & separatorSpace & sectionTitle
+    ElseIf IsGenericTocLabel(visibleTitle) Then
+        japaneseToc = ChrW(&H76EE) & ChrW(&H6B21)
+        If visibleTitle = japaneseToc Then
+            SetSlideTitle tocSlide, visibleTitle & ChrW(&HFF1A) & sectionTitle
+        Else
+            SetSlideTitle tocSlide, visibleTitle & ": " & sectionTitle
+        End If
+    Else
+        SetSlideTitle tocSlide, sectionTitle
+    End If
+
+End Sub
+
+Private Sub FitTocTitles(ByVal pres As Presentation)
+    Const LOGO_CLEARANCE As Single = 72
+    Dim sld As Slide
+    Dim titleShape As Shape
+    Dim titleRange As textRange
+    Dim availableWidth As Single
+    Dim targetSize As Single
+
+    For Each sld In pres.Slides
+        If IsTocSlide(sld) Then
+            Set titleShape = FindNamedShape(sld, TITLE_SHAPE)
+            If Not titleShape Is Nothing Then
+                availableWidth = pres.PageSetup.slideWidth - titleShape.Left - LOGO_CLEARANCE
+                If availableWidth <= 0 Then Err.Raise vbObjectError + 2114, , "TOC title has no usable width on slide " & CStr(sld.slideIndex) & "."
+
+                ' Keep the title inside the header instead of allowing PowerPoint
+                ' to grow the text box over the master logo.
+                titleShape.TextFrame2.AutoSize = msoAutoSizeNone
+                titleShape.TextFrame.WordWrap = msoFalse
+                titleShape.Width = availableWidth
+                Set titleRange = titleShape.TextFrame.textRange
+                targetSize = titleRange.Characters(1, 1).Font.Size
+                If targetSize > mFontMax Then targetSize = mFontMax
+                If targetSize < mFontMin Then targetSize = mFontMin
+                titleRange.Font.Size = targetSize
+
+                Do While titleRange.BoundWidth > availableWidth And targetSize > mFontMin
+                    targetSize = targetSize - 0.5
+                    If targetSize < mFontMin Then targetSize = mFontMin
+                    titleRange.Font.Size = targetSize
+                Loop
+            End If
+        End If
+    Next sld
+End Sub
+
+Private Function NavigationEntryText(ByVal sld As Slide) As String
+    If IsTocSlide(sld) Then
+        NavigationEntryText = SlideTag(sld, TAG_NAV_CODE) & ". " & SlideTag(sld, TAG_SECTION_TITLE)
+    Else
+        NavigationEntryText = GetSlideTitle(sld)
+    End If
+End Function
+
+Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide, ByVal body As Shape, ByVal isLeftColumn As Boolean, ByVal currentSection As Long)
+    Dim target As Slide
+    Dim targetIndex As Long
+    Dim lineNumber As Long
+    Dim tocText As String
+    Dim navigationCode As String
+    Dim targetSection As Long
+    Dim splitAfter As Long
+    Dim paragraphRange As textRange
+    Dim linkRange As textRange
+    Dim linkLength As Long
+
+    splitAfter = CLng(Val(SlideTag(tocSlide, TAG_TOC_SPLIT_AFTER)))
+    If splitAfter <= 0 Then splitAfter = 3
+    tocText = ""
+
+    For targetIndex = 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        navigationCode = SlideTag(target, TAG_NAV_CODE)
+        If ShouldIncludeInToc(target) Then
+            targetSection = CLng(Val(navigationCode))
+            If (isLeftColumn And targetSection <= splitAfter) Or (Not isLeftColumn And targetSection > splitAfter) Then
+                If Len(tocText) > 0 Then tocText = tocText & vbCrLf
+                tocText = tocText & NavigationEntryText(target)
+            End If
+        End If
+    Next targetIndex
+
+    body.TextFrame.textRange.text = tocText
+    body.TextFrame.textRange.Font.Bold = msoFalse
+    body.TextFrame.textRange.Font.Underline = msoFalse
+    With body.TextFrame.Ruler.Levels(1)
+        .FirstMargin = 0
+        .LeftMargin = 0
+    End With
+    With body.TextFrame.Ruler.Levels(2)
+        .FirstMargin = 18
+        .LeftMargin = 18
+    End With
+
+    lineNumber = 0
+    For targetIndex = 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        navigationCode = SlideTag(target, TAG_NAV_CODE)
+        If ShouldIncludeInToc(target) Then
+            targetSection = CLng(Val(navigationCode))
+            If (isLeftColumn And targetSection <= splitAfter) Or (Not isLeftColumn And targetSection > splitAfter) Then
+                lineNumber = lineNumber + 1
+                Set paragraphRange = body.TextFrame.textRange.Paragraphs(lineNumber, 1)
+                linkLength = Len(paragraphRange.text)
+                Do While linkLength > 0 And (Mid$(paragraphRange.text, linkLength, 1) = vbCr Or Mid$(paragraphRange.text, linkLength, 1) = vbLf)
+                    linkLength = linkLength - 1
+                Loop
+                Set linkRange = paragraphRange.Characters(1, linkLength)
+                ClearTextHyperlink linkRange
+                If targetSection = currentSection Then
+                    linkRange.Font.Color.RGB = RGB(27, 38, 53)
+                    paragraphRange.Font.Color.RGB = RGB(27, 38, 53)
+                Else
+                    linkRange.Font.Color.RGB = RGB(170, 179, 188)
+                    paragraphRange.Font.Color.RGB = RGB(170, 179, 188)
+                End If
+                If IsTocSlide(target) Then
+                    paragraphRange.IndentLevel = 1
+                    paragraphRange.Font.Bold = msoFalse
+                    paragraphRange.Font.Underline = msoFalse
+                    linkRange.Font.Bold = msoTrue
+                    linkRange.Font.Underline = msoTrue
+                Else
+                    paragraphRange.IndentLevel = 2
+                    linkRange.Font.Bold = msoFalse
+                    paragraphRange.Font.Bold = msoFalse
+                    linkRange.Font.Underline = msoFalse
+                    paragraphRange.Font.Underline = msoFalse
+                End If
+                AddTocLinkOverlay tocSlide, paragraphRange, target, IIf(isLeftColumn, "L", "R"), lineNumber
+            End If
+        End If
+    Next targetIndex
+End Sub
+
+Private Sub ClearTextHyperlink(ByVal textRange As textRange)
+    On Error Resume Next
+    textRange.ActionSettings(ppMouseClick).Hyperlink.Delete
+    textRange.ActionSettings(ppMouseClick).Action = ppActionNone
+    On Error GoTo 0
+End Sub
+
+Private Sub DeleteTocLinkOverlays(ByVal tocSlide As Slide)
+    Dim shapeIndex As Long
+    Dim shapeName As String
+
+    For shapeIndex = tocSlide.Shapes.Count To 1 Step -1
+        shapeName = tocSlide.Shapes(shapeIndex).Name
+        If StrComp(Left$(shapeName, Len(TOC_LINK_PREFIX)), TOC_LINK_PREFIX, vbTextCompare) = 0 Then
+            tocSlide.Shapes(shapeIndex).Delete
+        ElseIf tocSlide.Shapes(shapeIndex).Type = msoLine Then
+            ' Copied TOC slides can retain old manually drawn rules. The TOC
+            ' generator owns this slide content, so remove those stale lines.
+            tocSlide.Shapes(shapeIndex).Delete
+        End If
+    Next shapeIndex
+End Sub
+
+Private Sub AddTocLinkOverlay(ByVal tocSlide As Slide, ByVal paragraphRange As textRange, ByVal target As Slide, ByVal columnKey As String, ByVal lineNumber As Long)
+    Dim overlay As Shape
+    Dim overlayName As String
+
+    overlayName = TOC_LINK_PREFIX & columnKey & "_" & CStr(lineNumber)
+    Set overlay = tocSlide.Shapes.AddShape(msoShapeRectangle, paragraphRange.BoundLeft, paragraphRange.BoundTop, paragraphRange.BoundWidth, paragraphRange.BoundHeight)
+    overlay.Name = overlayName
+    overlay.Fill.Visible = msoTrue
+    overlay.Fill.Solid
+    overlay.Fill.Transparency = 1
+    overlay.Line.Visible = msoFalse
+    overlay.AlternativeText = "Link to " & NavigationEntryText(target)
+    With overlay.ActionSettings(ppMouseClick)
+        .Action = ppActionHyperlink
+        .Hyperlink.SubAddress = CStr(target.slideId) & "," & CStr(target.slideIndex) & "," & NavigationEntryText(target)
+    End With
+    overlay.ZOrder msoBringToFront
+End Sub
+
+Private Sub LoadConfiguration(ByVal pres As Presentation)
+    Dim configSlide As Slide
+    Dim value As String
+
+    mFontLatin = "Aptos"
+    mFontCjk = "Yu Gothic"
+    mFontMin = 18
+    mFontMax = 32
+    mHideHiddenFromToc = True
+
+    Set configSlide = FindConfigSlide(pres)
+    If configSlide Is Nothing Then Exit Sub
+
+    value = ConfigText(configSlide, CFG_FONT_LATIN, mFontLatin)
+    If Len(value) > 0 Then mFontLatin = value
+    value = ConfigText(configSlide, CFG_FONT_CJK, mFontCjk)
+    If Len(value) > 0 Then mFontCjk = value
+    mFontMin = CSng(Val(ConfigText(configSlide, CFG_FONT_MIN, CStr(mFontMin))))
+    mFontMax = CSng(Val(ConfigText(configSlide, CFG_FONT_MAX, CStr(mFontMax))))
+    mHideHiddenFromToc = ParseBoolean(ConfigText(configSlide, CFG_HIDE_HIDDEN, "Yes"))
+
+    If mFontMin <= 0 Then Err.Raise vbObjectError + 2110, , "Minimum font size must be greater than zero."
+    If mFontMax < mFontMin Then Err.Raise vbObjectError + 2111, , "Maximum font size must be greater than or equal to minimum font size."
+End Sub
+
+Private Function FindConfigSlide(ByVal pres As Presentation) As Slide
+    Dim sld As Slide
+    For Each sld In pres.Slides
+        If IsConfigSlide(sld) Then
+            Set FindConfigSlide = sld
+            Exit Function
+        End If
+    Next sld
+    Set FindConfigSlide = Nothing
+End Function
+
+Private Sub SetDisplayedVersion(ByVal pres As Presentation)
+    Dim configSlide As Slide
+    Dim versionShape As Shape
+
+    Set configSlide = FindConfigSlide(pres)
+    If configSlide Is Nothing Then Exit Sub
+    Set versionShape = FindNamedShape(configSlide, CFG_VERSION)
+    If Not versionShape Is Nothing Then versionShape.TextFrame.textRange.text = NAVIGATION_VERSION
+End Sub
+
+Private Function ConfigText(ByVal configSlide As Slide, ByVal shapeName As String, ByVal defaultValue As String) As String
+    Dim valueShape As Shape
+    Set valueShape = FindNamedShape(configSlide, shapeName)
+    If valueShape Is Nothing Then
+        ConfigText = defaultValue
+    Else
+        ConfigText = Trim$(valueShape.TextFrame.textRange.text)
+        If Len(ConfigText) = 0 Then ConfigText = defaultValue
+    End If
+End Function
+
+Private Function ParseBoolean(ByVal value As String) As Boolean
+    Select Case LCase$(Trim$(value))
+        Case "yes", "true", "1", "on"
+            ParseBoolean = True
+        Case "no", "false", "0", "off"
+            ParseBoolean = False
+        Case Else
+            Err.Raise vbObjectError + 2112, , "Hide hidden slides must be Yes or No."
+    End Select
+End Function
+
+Private Function ShouldIncludeInToc(ByVal sld As Slide) As Boolean
+    If IsConfigSlide(sld) Or IsCoverSlide(sld) Then
+        ShouldIncludeInToc = False
+    ElseIf Len(SlideTag(sld, TAG_NAV_CODE)) = 0 Then
+        ShouldIncludeInToc = False
+    ElseIf mHideHiddenFromToc And sld.SlideShowTransition.Hidden <> msoFalse Then
+        ShouldIncludeInToc = False
+    Else
+        ShouldIncludeInToc = True
+    End If
+End Function
+
+Private Sub ApplyTypography(ByVal pres As Presentation)
+    Dim sld As Slide
+    Dim shp As Shape
+    Dim textRange As textRange
+    Dim originalSize As Single
+    Dim targetSize As Single
+
+    For Each sld In pres.Slides
+        If Not IsConfigSlide(sld) Then
+            For Each shp In sld.Shapes
+                If IsTypographyManagedShape(shp) And shp.HasTextFrame = msoTrue Then
+                    If shp.TextFrame.HasText = msoTrue Then
+                        Set textRange = shp.TextFrame.textRange
+                        textRange.Font.Name = mFontLatin
+                        On Error Resume Next
+                        textRange.Font.NameFarEast = mFontCjk
+                        On Error GoTo 0
+                        originalSize = CSng(Val(ShapeTag(shp, TAG_ORIGINAL_FONT_SIZE)))
+                        If originalSize <= 0 Then
+                            originalSize = textRange.Characters(1, 1).Font.Size
+                            If originalSize <= 0 Then originalSize = mFontMin
+                            shp.Tags.Add TAG_ORIGINAL_FONT_SIZE, CStr(originalSize)
+                        End If
+                        targetSize = originalSize
+                        If targetSize < mFontMin Then targetSize = mFontMin
+                        If targetSize > mFontMax Then targetSize = mFontMax
+                        textRange.Font.Size = targetSize
+                    End If
+                End If
+            Next shp
+        End If
+    Next sld
+End Sub
+
+Private Function ShapeTag(ByVal shp As Shape, ByVal tagName As String) As String
+    On Error Resume Next
+    ShapeTag = Trim$(shp.Tags(tagName))
+    On Error GoTo 0
+End Function
+
+Private Function IsTypographyManagedShape(ByVal shp As Shape) As Boolean
+    Select Case UCase$(shp.Name)
+        Case UCase$(TITLE_SHAPE), UCase$(TOC_BODY_SHAPE), UCase$(TOC_BODY_LEFT), UCase$(TOC_BODY_RIGHT), UCase$(STATUS_SHAPE), "SCITEX_RUN_BUTTON"
+            IsTypographyManagedShape = True
+        Case Else
+            IsTypographyManagedShape = False
+    End Select
+End Function
+
+Private Function GetSlideTitle(ByVal sld As Slide) As String
+    Dim titleShape As Shape
+    Set titleShape = FindNamedShape(sld, TITLE_SHAPE)
+    If titleShape Is Nothing Then Err.Raise vbObjectError + 2102, , "Slide " & CStr(sld.slideIndex) & " is missing " & TITLE_SHAPE
+    GetSlideTitle = Trim$(titleShape.TextFrame.textRange.text)
+End Function
+
+Private Sub SetSlideTitle(ByVal sld As Slide, ByVal value As String)
+    Dim titleShape As Shape
+    Set titleShape = FindNamedShape(sld, TITLE_SHAPE)
+    If titleShape Is Nothing Then Err.Raise vbObjectError + 2103, , "Slide " & CStr(sld.slideIndex) & " is missing " & TITLE_SHAPE
+    titleShape.TextFrame.textRange.text = value
+End Sub
+
+Private Function FindNamedShape(ByVal sld As Slide, ByVal shapeName As String) As Shape
+    Dim shp As Shape
+    For Each shp In sld.Shapes
+        If StrComp(shp.Name, shapeName, vbTextCompare) = 0 Then
+            Set FindNamedShape = shp
+            Exit Function
+        End If
+    Next shp
+    Set FindNamedShape = Nothing
+End Function
+
+Private Function SlideTag(ByVal sld As Slide, ByVal tagName As String) As String
+    On Error Resume Next
+    SlideTag = Trim$(sld.Tags(tagName))
+    On Error GoTo 0
+End Function
+
+Private Sub DeleteSlideTag(ByVal sld As Slide, ByVal tagName As String)
+    On Error Resume Next
+    sld.Tags.Delete tagName
+    On Error GoTo 0
+End Sub
+
+Private Function IsConfigSlide(ByVal sld As Slide) As Boolean
+    IsConfigSlide = (StrComp(SlideTag(sld, TAG_CONFIG), "1", vbTextCompare) = 0)
+End Function
+
+Private Function IsCoverSlide(ByVal sld As Slide) As Boolean
+    IsCoverSlide = (StrComp(SlideTag(sld, TAG_COVER), "1", vbTextCompare) = 0)
+End Function
+
+Private Function IsTocSlide(ByVal sld As Slide) As Boolean
+    IsTocSlide = (StrComp(SlideTag(sld, TAG_TOC), "1", vbTextCompare) = 0)
+End Function
+
+Private Function StripNavigationPrefix(ByVal value As String) As String
+    Dim text As String
+    Dim dotPosition As Long
+    Dim prefix As String
+
+    text = Trim$(value)
+    dotPosition = InStr(1, text, ".", vbBinaryCompare)
+    If dotPosition > 1 Then
+        prefix = Left$(text, dotPosition - 1)
+        If IsNavigationPrefix(prefix) Then text = Trim$(Mid$(text, dotPosition + 1))
+    End If
+    StripNavigationPrefix = text
+End Function
+
+Private Function IsNavigationPrefix(ByVal value As String) As Boolean
+    Dim index As Long
+    Dim character As String
+    Dim hasDigit As Boolean
+
+    hasDigit = False
+    For index = 1 To Len(value)
+        character = Mid$(value, index, 1)
+        If character >= "0" And character <= "9" Then
+            hasDigit = True
+        ElseIf (character >= "a" And character <= "z") Or (character >= "A" And character <= "Z") Then
+            ' Letters are allowed after the section number.
+        Else
+            IsNavigationPrefix = False
+            Exit Function
+        End If
+    Next index
+    IsNavigationPrefix = hasDigit
+End Function
+
+Private Function LetterCode(ByVal number As Long) As String
+    Dim value As Long
+    Dim result As String
+
+    value = number
+    result = ""
+    Do While value > 0
+        value = value - 1
+        result = Chr$(97 + (value Mod 26)) & result
+        value = value \ 26
+    Loop
+    LetterCode = result
+End Function
+
+Private Sub SetStatus(ByVal pres As Presentation, ByVal value As String)
+    On Error Resume Next
+    Dim statusShape As Shape
+    Set statusShape = FindNamedShape(pres.Slides(1), STATUS_SHAPE)
+    If Not statusShape Is Nothing Then statusShape.TextFrame.textRange.text = value
+    On Error GoTo 0
+End Sub
