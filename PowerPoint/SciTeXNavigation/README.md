@@ -135,3 +135,17 @@ wrote them, so what has been checked is the structure of the module
 variable declared; every `GoTo` target present) and the diagnosis the changes
 follow from. The behaviour itself is unproven until someone runs it. Run
 `tools/build-and-test.ps1` on Windows before shipping a deck with it.
+
+### 縮めても入らないとき
+
+`SCITEX_CFG_FONT_MIN`（既定18pt）まで縮めても収まらない場合、**それ以上は
+小さくしません**。代わりに `SCITEX_STATUS` に該当スライド番号を出します。
+
+```
+Navigation v0.2.0 updated - 4 sections. Too much content at 18pt on slide(s): 8,19
+```
+
+operator の判断（2026-08-27）:「あんまり文字が小さくなるようなら、そもそも
+スライドにそんな入れるなって話」。読めない字で収めるのは解決ではないので、
+その時点で内容を減らす合図として出します。黙って溢れさせないのは、それが
+このバージョンで直した不具合と見分けがつかなくなるためです。

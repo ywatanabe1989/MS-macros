@@ -31,6 +31,7 @@ Private mFontMin As Single
 Private mFontMax As Single
 Private mTitleSize As Single
 Private mTocPrefixTab As Single
+Private mOverfullSlides As String
 Private mHideHiddenFromToc As Boolean
 Private mTwoColumnToc As Boolean
 
@@ -43,6 +44,7 @@ Public Sub RunSciTeXNavigation()
     Dim sectionNumber As Long
 
     Set pres = ActivePresentation
+    mOverfullSlides = ""
     LoadConfiguration pres
     SetDisplayedVersion pres
     mTwoColumnToc = HasTwoColumnToc(pres)
@@ -57,7 +59,17 @@ Public Sub RunSciTeXNavigation()
         If IsTocSlide(sld) Then RebuildFullToc pres, sld
     Next sld
 
-    SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & CStr(sectionNumber) & " sections"
+    If Len(mOverfullSlides) > 0 Then
+        ' Shrinking stopped at the configured minimum and the text still does
+        ' not fit. Going smaller is not the answer -- at that point the slide
+        ' is carrying more than a slide should. Say which ones, rather than
+        ' leaving an overflow that looks like the bug this version fixed.
+        SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & _
+            CStr(sectionNumber) & " sections. Too much content at " & _
+            CStr(mFontMin) & "pt on slide(s): " & mOverfullSlides
+    Else
+        SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & CStr(sectionNumber) & " sections"
+    End If
     Exit Sub
 
 Failed:
@@ -335,6 +347,7 @@ Private Sub FitTocTitles(ByVal pres As Presentation)
                     If targetSize < mFontMin Then targetSize = mFontMin
                     titleRange.Font.Size = targetSize
                 Loop
+                If titleRange.BoundWidth > availableWidth Then NoteOverfull sld
             End If
         End If
 ContinueSlide:
@@ -489,6 +502,16 @@ Private Sub FitTocBody(ByVal body As Shape)
         If targetSize < mFontMin Then targetSize = mFontMin
         bodyRange.Font.Size = targetSize
     Loop
+
+    If bodyRange.BoundHeight > available Then NoteOverfull body.Parent
+End Sub
+
+Private Sub NoteOverfull(ByVal sld As Slide)
+    Dim label As String
+    label = CStr(sld.SlideIndex)
+    If InStr(1, "," & mOverfullSlides & ",", "," & label & ",") > 0 Then Exit Sub
+    If Len(mOverfullSlides) > 0 Then mOverfullSlides = mOverfullSlides & ","
+    mOverfullSlides = mOverfullSlides & label
 End Sub
 
 Private Sub ClearTextHyperlink(ByVal textRange As TextRange)
