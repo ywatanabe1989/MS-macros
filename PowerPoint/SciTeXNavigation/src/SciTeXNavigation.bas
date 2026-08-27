@@ -419,7 +419,7 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
     Dim linkLength As Long
 
     splitAfter = CLng(Val(SlideTag(tocSlide, TAG_TOC_SPLIT_AFTER)))
-    If splitAfter <= 0 Then splitAfter = 3
+    If splitAfter <= 0 Then splitAfter = BalancedSplitAfter(pres)
     tocText = ""
 
     For targetIndex = 1 To pres.Slides.Count
@@ -561,6 +561,60 @@ Private Sub NoteOverfull(ByVal sld As Slide)
     If Len(mOverfullSlides) > 0 Then mOverfullSlides = mOverfullSlides & ","
     mOverfullSlides = mOverfullSlides & label
 End Sub
+
+' Where to cut the index so the two columns come out even.
+'
+' The split used to be a number someone had to know and keep current. It goes
+' stale the moment a section is added: AICHI v18 still carried 5 from a
+' five-section deck, and with nine sections that put 23 entries in the left
+' column against 9 in the right -- which is also what pushed the left column
+' off the bottom of the slide.
+'
+' Counting the entries and picking the cut that minimises the difference needs
+' no maintenance. The tag still wins when it is set, so a deck that wants an
+' uneven split on purpose keeps it.
+Private Function BalancedSplitAfter(ByVal pres As Presentation) As Long
+    Dim counts(1 To 64) As Long
+    Dim highest As Long
+    Dim total As Long
+    Dim sld As Slide
+    Dim section As Long
+    Dim candidate As Long
+    Dim leftCount As Long
+    Dim best As Long
+    Dim bestGap As Long
+    Dim gap As Long
+
+    For Each sld In pres.Slides
+        If ShouldIncludeInToc(sld) Then
+            section = CLng(Val(SlideTag(sld, TAG_NAV_CODE)))
+            If section >= 1 And section <= 64 Then
+                counts(section) = counts(section) + 1
+                total = total + 1
+                If section > highest Then highest = section
+            End If
+        End If
+    Next sld
+
+    If highest = 0 Then
+        BalancedSplitAfter = 3
+        Exit Function
+    End If
+
+    best = 1
+    bestGap = total + 1
+    leftCount = 0
+    For candidate = 1 To highest
+        leftCount = leftCount + counts(candidate)
+        gap = Abs(leftCount - (total - leftCount))
+        If gap < bestGap Then
+            bestGap = gap
+            best = candidate
+        End If
+    Next candidate
+
+    BalancedSplitAfter = best
+End Function
 
 Private Sub ClearTextHyperlink(ByVal textRange As TextRange)
     On Error Resume Next
