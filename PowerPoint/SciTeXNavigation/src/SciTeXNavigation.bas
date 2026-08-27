@@ -1,7 +1,7 @@
 Attribute VB_Name = "SciTeXNavigation"
 Option Explicit
 
-Private Const NAVIGATION_VERSION As String = "0.1.2"
+Private Const NAVIGATION_VERSION As String = "0.2.0"
 Private Const TAG_CONFIG As String = "SCITEX_CONFIG"
 Private Const TAG_COVER As String = "SCITEX_COVER"
 Private Const TAG_TOC As String = "SCITEX_TOC"
@@ -21,12 +21,16 @@ Private Const CFG_FONT_MIN As String = "SCITEX_CFG_FONT_MIN"
 Private Const CFG_FONT_MAX As String = "SCITEX_CFG_FONT_MAX"
 Private Const CFG_HIDE_HIDDEN As String = "SCITEX_CFG_HIDE_HIDDEN"
 Private Const CFG_VERSION As String = "SCITEX_CFG_VERSION"
+Private Const CFG_TITLE_SIZE As String = "SCITEX_CFG_TITLE_SIZE"
+Private Const CFG_TOC_PREFIX_TAB As String = "SCITEX_CFG_TOC_PREFIX_TAB"
 Private Const TAG_ORIGINAL_FONT_SIZE As String = "SCITEX_ORIGINAL_FONT_SIZE"
 
 Private mFontLatin As String
 Private mFontCjk As String
 Private mFontMin As Single
 Private mFontMax As Single
+Private mTitleSize As Single
+Private mTocPrefixTab As Single
 Private mHideHiddenFromToc As Boolean
 Private mTwoColumnToc As Boolean
 
@@ -307,9 +311,10 @@ Private Sub FitTocTitles(ByVal pres As Presentation)
     Dim targetSize As Single
 
     For Each sld In pres.Slides
-        If IsTocSlide(sld) Then
+        If Not IsConfigSlide(sld) Then
             Set titleShape = FindNamedShape(sld, TITLE_SHAPE)
             If Not titleShape Is Nothing Then
+                If titleShape.TextFrame.HasText <> msoTrue Then GoTo ContinueSlide
                 availableWidth = pres.PageSetup.SlideWidth - titleShape.Left - LOGO_CLEARANCE
                 If availableWidth <= 0 Then Err.Raise vbObjectError + 2114, , "TOC title has no usable width on slide " & CStr(sld.SlideIndex) & "."
 
@@ -320,6 +325,7 @@ Private Sub FitTocTitles(ByVal pres As Presentation)
                 titleShape.Width = availableWidth
                 Set titleRange = titleShape.TextFrame.TextRange
                 targetSize = titleRange.Characters(1, 1).Font.Size
+                If mTitleSize > 0 Then targetSize = mTitleSize
                 If targetSize > mFontMax Then targetSize = mFontMax
                 If targetSize < mFontMin Then targetSize = mFontMin
                 titleRange.Font.Size = targetSize
@@ -331,12 +337,19 @@ Private Sub FitTocTitles(ByVal pres As Presentation)
                 Loop
             End If
         End If
+ContinueSlide:
     Next sld
 End Sub
 
+' The prefix and the title are separated by a TAB, not by spaces.
+'
+' The configured face is proportional, so "1a." and "3i." are not the same
+' width and no amount of padding lines the titles up -- the operator sees a
+' ragged left edge down the whole index. A tab stop is absolute: every title
+' starts at mTocPrefixTab regardless of what the prefix measures.
 Private Function NavigationEntryText(ByVal sld As Slide) As String
     If IsTocSlide(sld) Then
-        NavigationEntryText = SlideTag(sld, TAG_NAV_CODE) & ". " & SlideTag(sld, TAG_SECTION_TITLE)
+        NavigationEntryText = SlideTag(sld, TAG_NAV_CODE) & "." & vbTab & SlideTag(sld, TAG_SECTION_TITLE)
     Else
         NavigationEntryText = GetSlideTitle(sld)
     End If
@@ -373,14 +386,17 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
     body.TextFrame.TextRange.Text = tocText
     body.TextFrame.TextRange.Font.Bold = msoFalse
     body.TextFrame.TextRange.Font.Underline = msoFalse
+    ' A hanging indent, so a title that wraps lines up under itself rather
+    ' than under its own prefix.
     With body.TextFrame.Ruler.Levels(1)
         .FirstMargin = 0
-        .LeftMargin = 0
+        .LeftMargin = mTocPrefixTab
     End With
     With body.TextFrame.Ruler.Levels(2)
         .FirstMargin = 18
-        .LeftMargin = 18
+        .LeftMargin = mTocPrefixTab + 18
     End With
+    SetPrefixTabStop body
 
     lineNumber = 0
     For targetIndex = 1 To pres.Slides.Count
@@ -421,6 +437,58 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
             End If
         End If
     Next targetIndex
+
+    ' After the text is final, not before: the size depends on how many lines
+    ' the finished column actually has.
+    FitTocBody body
+End Sub
+
+' One tab stop at mTocPrefixTab, and no others.
+'
+' Ruler.TabStops accumulates: rebuilding the index without clearing leaves the
+' previous run's stops behind, and the second stop is the one the tab lands on.
+Private Sub SetPrefixTabStop(ByVal body As Shape)
+    Dim bodyRuler As Ruler
+    Dim index As Long
+
+    Set bodyRuler = body.TextFrame.Ruler
+    For index = bodyRuler.TabStops.Count To 1 Step -1
+        bodyRuler.TabStops(index).Clear
+    Next index
+    bodyRuler.TabStops.Add ppTabStopLeft, mTocPrefixTab
+End Sub
+
+' Shrink the index text until the BOX fits the slide.
+'
+' The bodies are authored with spAutoFit, which does not clip -- it grows the
+' shape. So the failure is never "text outside its box", it is the box itself
+' walking off the bottom of the slide while every stored rectangle still looks
+' correct. Measured 2026-08-27 on AICHI v11: 15 entries at 18pt leave about
+' 154pt of headroom, seven lines, so a few wrapped titles on a machine with
+' different font metrics are enough to push it over. Turning autosize off and
+' shrinking to fit makes that impossible rather than unlikely.
+Private Sub FitTocBody(ByVal body As Shape)
+    Dim bodyRange As TextRange
+    Dim targetSize As Single
+    Dim available As Single
+
+    If body.TextFrame.HasText <> msoTrue Then Exit Sub
+
+    body.TextFrame2.AutoSize = msoAutoSizeNone
+    body.TextFrame.WordWrap = msoTrue
+    available = body.Height - body.TextFrame.MarginTop - body.TextFrame.MarginBottom
+    If available <= 0 Then Err.Raise vbObjectError + 2115, , "TOC body " & body.Name & " has no usable height."
+
+    Set bodyRange = body.TextFrame.TextRange
+    targetSize = bodyRange.Characters(1, 1).Font.Size
+    If targetSize > mFontMax Then targetSize = mFontMax
+    bodyRange.Font.Size = targetSize
+
+    Do While bodyRange.BoundHeight > available And targetSize > mFontMin
+        targetSize = targetSize - 0.5
+        If targetSize < mFontMin Then targetSize = mFontMin
+        bodyRange.Font.Size = targetSize
+    Loop
 End Sub
 
 Private Sub ClearTextHyperlink(ByVal textRange As TextRange)
@@ -473,6 +541,15 @@ Private Sub LoadConfiguration(ByVal pres As Presentation)
     mFontCjk = "Yu Gothic"
     mFontMin = 18
     mFontMax = 32
+    ' 0 means "leave the authored title size alone". Set this on the config
+    ' slide to the master's title size when the deck's titles must match the
+    ' master -- SCITEX_TITLE is a plain text box, not the title placeholder,
+    ' so it inherits nothing and the size has to be stated somewhere.
+    mTitleSize = 0
+    ' Where the TOC entry text starts, in points from the left of the body.
+    ' The prefix sits before it and the title after it, so every title begins
+    ' at the same x no matter how wide "3i." renders.
+    mTocPrefixTab = 34
     mHideHiddenFromToc = True
 
     Set configSlide = FindConfigSlide(pres)
@@ -485,6 +562,9 @@ Private Sub LoadConfiguration(ByVal pres As Presentation)
     mFontMin = CSng(Val(ConfigText(configSlide, CFG_FONT_MIN, CStr(mFontMin))))
     mFontMax = CSng(Val(ConfigText(configSlide, CFG_FONT_MAX, CStr(mFontMax))))
     mHideHiddenFromToc = ParseBoolean(ConfigText(configSlide, CFG_HIDE_HIDDEN, "Yes"))
+    mTitleSize = CSng(Val(ConfigText(configSlide, CFG_TITLE_SIZE, CStr(mTitleSize))))
+    value = ConfigText(configSlide, CFG_TOC_PREFIX_TAB, CStr(mTocPrefixTab))
+    If CSng(Val(value)) > 0 Then mTocPrefixTab = CSng(Val(value))
 
     If mFontMin <= 0 Then Err.Raise vbObjectError + 2110, , "Minimum font size must be greater than zero."
     If mFontMax < mFontMin Then Err.Raise vbObjectError + 2111, , "Maximum font size must be greater than or equal to minimum font size."
@@ -558,10 +638,22 @@ Private Sub ApplyTypography(ByVal pres As Presentation)
                 If IsTypographyManagedShape(shp) And shp.HasTextFrame = msoTrue Then
                     If shp.TextFrame.HasText = msoTrue Then
                         Set textRange = shp.TextFrame.TextRange
-                        textRange.Font.Name = mFontLatin
-                        On Error Resume Next
-                        textRange.Font.NameFarEast = mFontCjk
-                        On Error GoTo 0
+                        If IsTitleShape(shp) Then
+                            ' Bind to the THEME fonts rather than stamping a
+                            ' literal face. Writing "Arial" here is what made
+                            ' the titles disagree with the master: the master
+                            ' asks for the theme major font and this line
+                            ' overwrote it on every run.
+                            textRange.Font.Name = "+mj-lt"
+                            On Error Resume Next
+                            textRange.Font.NameFarEast = "+mj-ea"
+                            On Error GoTo 0
+                        Else
+                            textRange.Font.Name = mFontLatin
+                            On Error Resume Next
+                            textRange.Font.NameFarEast = mFontCjk
+                            On Error GoTo 0
+                        End If
                         originalSize = CSng(Val(ShapeTag(shp, TAG_ORIGINAL_FONT_SIZE)))
                         If originalSize <= 0 Then
                             originalSize = textRange.Characters(1, 1).Font.Size
@@ -569,8 +661,15 @@ Private Sub ApplyTypography(ByVal pres As Presentation)
                             shp.Tags.Add TAG_ORIGINAL_FONT_SIZE, CStr(originalSize)
                         End If
                         targetSize = originalSize
-                        If targetSize < mFontMin Then targetSize = mFontMin
-                        If targetSize > mFontMax Then targetSize = mFontMax
+                        If IsTitleShape(shp) And mTitleSize > 0 Then
+                            ' The title's size is its own setting. Clamping it
+                            ' into the body range is why every title came out
+                            ' at the body maximum instead of the master's size.
+                            targetSize = mTitleSize
+                        Else
+                            If targetSize < mFontMin Then targetSize = mFontMin
+                            If targetSize > mFontMax Then targetSize = mFontMax
+                        End If
                         textRange.Font.Size = targetSize
                     End If
                 End If
@@ -583,6 +682,10 @@ Private Function ShapeTag(ByVal shp As Shape, ByVal tagName As String) As String
     On Error Resume Next
     ShapeTag = Trim$(shp.Tags(tagName))
     On Error GoTo 0
+End Function
+
+Private Function IsTitleShape(ByVal shp As Shape) As Boolean
+    IsTitleShape = (StrComp(shp.Name, TITLE_SHAPE, vbTextCompare) = 0)
 End Function
 
 Private Function IsTypographyManagedShape(ByVal shp As Shape) As Boolean

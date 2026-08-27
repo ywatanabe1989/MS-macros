@@ -63,3 +63,75 @@ The PowerShell tools require desktop PowerPoint on Windows. When VBA project acc
 ## Release policy
 
 The repository contains the reusable module and generic sandbox. Business-contest decks remain outside this public repository.
+
+## Preconditions — what a deck must already have
+
+The macro edits shapes it finds by name. It does not create them. Give it a
+deck that does not meet these and it raises rather than guessing:
+
+| Requirement | Why | Error if missing |
+|---|---|---|
+| Every non-config slide has a shape named `SCITEX_TITLE` | it is read and rewritten as the slide's title | `2102` / `2103` |
+| Slides to be indexed carry the tag `SCITEX_NAV_CODE` | untagged slides are skipped, silently and on purpose | — |
+| Index slides carry `SCITEX_TOC`, and a body named `SCITEX_TOC_BODY` (or `_LEFT` + `_RIGHT` for two columns) | the index text is written into it | — |
+| `SCITEX_TITLE` has usable width to the left of the logo | the title is shrunk to fit, and cannot fit in nothing | `2114` |
+| `SCITEX_TOC_BODY*` has usable height | same, vertically | `2115` |
+| The config slide is tagged `SCITEX_CONFIG` | optional; defaults apply without it | — |
+
+Shapes named anything else are never touched. The managed set is exactly
+`SCITEX_TITLE`, `SCITEX_TOC_BODY*`, `SCITEX_STATUS`, `SCITEX_RUN_BUTTON`.
+
+## v0.2.0 — the three defects reported 2026-08-27
+
+Measured on `AICHI-NEXT-UNICORN_SciTeX_v11_navigation_v0.1.1.pptm` with
+`scitex-kk/08_slides/scripts/check_deck.py` in the `business` repo.
+
+**1. `3a.` / `3b.` prefixes did not line up.** The entry was built as
+`code & ". " & title` in one proportional run. `1a.` and `3i.` are not the same
+width, so no amount of padding aligns the titles. Now the separator is a TAB
+and the body carries one left tab stop at `SCITEX_CFG_TOC_PREFIX_TAB`
+(default 34pt), with a hanging indent so a wrapped title lines up under itself.
+
+**2. Titles did not match the slide master.** `ApplyTypography` wrote
+`Font.Name = mFontLatin` onto `SCITEX_TITLE` on every run — the deck's config
+said `Arial`, and that overwrote the theme font the master asks for. It also
+clamped the title into the *body* size range, which is why every title came out
+at the body maximum instead of the master's size. Titles now bind to the theme
+(`+mj-lt` / `+mj-ea`), and take their size from `SCITEX_CFG_TITLE_SIZE` when it
+is set (`0`, the default, leaves the authored size alone).
+
+Note the shape is a plain text box, not the title placeholder, so it inherits
+*nothing* from the master. The size has to be stated; there is no "just let it
+inherit" available.
+
+**3. The index ran off the slide.** The bodies are authored with `spAutoFit`,
+which does not clip — it grows the shape. The overflow was never text leaving
+its box, it was the box leaving the slide, which is why every stored rectangle
+still looked correct. At 18pt with 15 entries there was about 154pt of headroom,
+seven lines: a few wrapped titles on a machine with different font metrics are
+enough. `FitTocBody` now turns autosize off and shrinks to fit, so the box
+cannot leave the slide rather than being unlikely to.
+
+`FitTocTitles` also now runs on **every** slide, not only index slides. Every
+slide's `SCITEX_TITLE` had the same grow-sideways settings; the index pages
+were just where it was noticed first.
+
+### How to check the fix without opening the deck
+
+```bash
+# in the business repo, after running the macro and saving
+/uvwork/venv-pptx/bin/python scitex-kk/08_slides/scripts/check_deck.py <deck> \
+  --baseline <the same deck before the macro ran>
+```
+
+Accepted when `prefix-font` reports 0 and `text-fit` reports no grow-to-fit box
+past a slide edge. Exit `0` clean, `10` findings, `20` unreadable.
+
+### Not verified here
+
+These changes are **not executed**. There is no PowerPoint on the machine that
+wrote them, so what has been checked is the structure of the module
+(Sub/Function, For/Next, With/End With, Do/Loop all balanced; every module
+variable declared; every `GoTo` target present) and the diagnosis the changes
+follow from. The behaviour itself is unproven until someone runs it. Run
+`tools/build-and-test.ps1` on Windows before shipping a deck with it.
