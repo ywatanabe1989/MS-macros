@@ -31,6 +31,7 @@ Private mFontMin As Single
 Private mFontMax As Single
 Private mTitleSize As Single
 Private mTocPrefixTab As Single
+Private mBackupPath As String
 Private mOverfullSlides As String
 Private mHideHiddenFromToc As Boolean
 Private mTwoColumnToc As Boolean
@@ -45,6 +46,7 @@ Public Sub RunSciTeXNavigation()
 
     Set pres = ActivePresentation
     mOverfullSlides = ""
+    BackupBeforeRun pres
     LoadConfiguration pres
     SetDisplayedVersion pres
     mTwoColumnToc = HasTwoColumnToc(pres)
@@ -66,15 +68,51 @@ Public Sub RunSciTeXNavigation()
         ' leaving an overflow that looks like the bug this version fixed.
         SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & _
             CStr(sectionNumber) & " sections. Too much content at " & _
-            CStr(mFontMin) & "pt on slide(s): " & mOverfullSlides
+            CStr(mFontMin) & "pt on slide(s): " & mOverfullSlides & _
+            ". Backup: " & BackupName()
     Else
-        SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & CStr(sectionNumber) & " sections"
+        SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & _
+            CStr(sectionNumber) & " sections. Backup: " & BackupName()
     End If
     Exit Sub
 
 Failed:
     SetStatus ActivePresentation, "Navigation error " & CStr(Err.Number) & ": " & Err.Description
     Err.Raise Err.Number, "RunSciTeXNavigation", Err.Description
+End Sub
+
+' Take a copy before touching anything.
+'
+' PowerPoint's undo stack does not survive a macro: once this has renumbered
+' slides and rewritten two index columns, Ctrl+Z will not put the deck back.
+' The only real undo is a file that still has the old content, so make one
+' first and tell the operator where it is. Requested 2026-08-27 after the
+' operator asked "if it goes wrong can I get back".
+'
+' Refuses to run on a presentation that has never been saved, because there is
+' nowhere to put the copy and nothing to go back to.
+Private Sub BackupBeforeRun(ByVal pres As Presentation)
+    Dim stamp As String
+    Dim backupPath As String
+    Dim baseName As String
+    Dim dotPosition As Long
+
+    If Len(pres.Path) = 0 Then
+        Err.Raise vbObjectError + 2120, , _
+            "Save the presentation first. This macro cannot be undone with Ctrl+Z, " & _
+            "so it will not run on a file that has never been saved."
+    End If
+
+    baseName = pres.Name
+    dotPosition = InStrRev(baseName, ".")
+    If dotPosition > 1 Then baseName = Left$(baseName, dotPosition - 1)
+
+    stamp = Format$(Now, "yyyymmdd-hhnnss")
+    backupPath = pres.Path & Application.PathSeparator & _
+        baseName & ".before-navigation-" & stamp & ".pptm"
+
+    pres.SaveCopyAs backupPath, ppSaveAsOpenXMLPresentationMacroEnabled
+    mBackupPath = backupPath
 End Sub
 
 Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
@@ -505,6 +543,16 @@ Private Sub FitTocBody(ByVal body As Shape)
 
     If bodyRange.BoundHeight > available Then NoteOverfull body.Parent
 End Sub
+
+Private Function BackupName() As String
+    Dim separatorPosition As Long
+    separatorPosition = InStrRev(mBackupPath, Application.PathSeparator)
+    If separatorPosition > 0 Then
+        BackupName = Mid$(mBackupPath, separatorPosition + 1)
+    Else
+        BackupName = mBackupPath
+    End If
+End Function
 
 Private Sub NoteOverfull(ByVal sld As Slide)
     Dim label As String
