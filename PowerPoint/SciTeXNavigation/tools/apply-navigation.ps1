@@ -31,6 +31,22 @@ The exported SciTeXNavigation.bas to import.
 Where to write the laid-out deck.  Must be .pptm -- a deck with a macro in it
 cannot be saved as .pptx.
 
+.NOTES
+LAUNCHING FROM WSL.  Calling powershell.exe directly across the WSL interop
+socket fails intermittently -- it times out with
+
+    WSL ERROR: UtilAcceptVsock:273: accept4 failed 110
+
+and writes NOTHING but that line, so the run looks like a script that produced
+no output rather than one that never started.  cmd.exe crosses the same socket
+fine, and PowerShell launched underneath it works, so go through cmd:
+
+    cd /mnt/c/Users/<user>          # cmd cannot start in a \\wsl.localhost path
+    cmd.exe /c "powershell -NoProfile -ExecutionPolicy Bypass -File C:\...\apply-navigation.ps1 ..."
+
+Observed 2026-08-28: direct launch failed twice in a row while
+`cmd.exe /c powershell -Command Write-Output ok` returned ok immediately.
+
 .EXAMPLE
 powershell -File apply-navigation.ps1 `
   -Deck   C:\Users\wyusu\Downloads\AICHI_v18.pptx `
