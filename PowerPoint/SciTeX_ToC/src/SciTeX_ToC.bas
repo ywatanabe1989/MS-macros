@@ -1,7 +1,7 @@
-Attribute VB_Name = "SciTeXNavigation"
+Attribute VB_Name = "SciTeX_ToC"
 Option Explicit
 
-Private Const NAVIGATION_VERSION As String = "0.4.0"
+Private Const TOC_VERSION As String = "0.5.0"
 Private Const TAG_CONFIG As String = "SCITEX_CONFIG"
 Private Const TAG_COVER As String = "SCITEX_COVER"
 Private Const TAG_TOC As String = "SCITEX_TOC"
@@ -49,7 +49,7 @@ Private mTwoColumnToc As Boolean
 ' The two public macros. Everything else stays out of Alt+F8.
 '
 ' RunSciTeXNavigation is what a person runs: it works on whatever deck is in
-' front of them. RunSciTeXNavigationOn is what a SCRIPT runs, and it exists
+' front of them. RefreshToCIn is what a SCRIPT runs, and it exists
 ' because ActivePresentation is not a safe way to say "this deck".
 '
 ' A presentation opened with WithWindow:=False has no window, so it is never
@@ -58,11 +58,21 @@ Private mTwoColumnToc As Boolean
 ' automated run opened the target windowless, and the macro broke into the VBE
 ' on this line and sat there. A headless caller cannot see that dialog, so the
 ' run simply never returned.
-Public Sub RunSciTeXNavigation()
-    RunSciTeXNavigationOn ActivePresentation
+Public Sub RefreshToC()
+    RefreshToCIn ActivePresentation
 End Sub
 
-Public Sub RunSciTeXNavigationOn(ByVal pres As Presentation)
+' The old name, kept so an existing button or Alt+F8 habit still works.
+'
+' A published name is a MIGRATION, not a rename: this deck's users may have a
+' shape wired to RunSciTeXNavigation already. It forwards and does nothing
+' else, and it goes away in the version after this one -- a compatibility
+' window with no closing date is not a migration, it is a second name.
+Public Sub RunSciTeXNavigation()
+    RefreshToC
+End Sub
+
+Public Sub RefreshToCIn(ByVal pres As Presentation)
     On Error GoTo Failed
 
     Dim sld As Slide
@@ -70,6 +80,10 @@ Public Sub RunSciTeXNavigationOn(ByVal pres As Presentation)
 
     If pres Is Nothing Then Err.Raise vbObjectError + 2118, , _
         "No presentation was given, and none is active."
+
+    ' Everything this run needs, checked before anything is touched.
+    ValidateDeck pres
+
     mOverfullSlides = ""
     mSplitCached = 0
     mSplitSlideIndex = 0
@@ -93,12 +107,12 @@ Public Sub RunSciTeXNavigationOn(ByVal pres As Presentation)
         ' not fit. Going smaller is not the answer -- at that point the slide
         ' is carrying more than a slide should. Say which ones, rather than
         ' leaving an overflow that looks like the bug this version fixed.
-        SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & _
+        SetStatus pres, "Navigation v" & TOC_VERSION & " updated - " & _
             CStr(sectionNumber) & " sections. Too much content at " & _
             CStr(mFontMin) & "pt on slide(s): " & mOverfullSlides & _
             ". Backup: " & BackupName()
     Else
-        SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & _
+        SetStatus pres, "Navigation v" & TOC_VERSION & " updated - " & _
             CStr(sectionNumber) & " sections. Backup: " & BackupName()
     End If
     Exit Sub
@@ -127,14 +141,105 @@ Private Sub WriteFailureLog(ByVal pres As Presentation, _
     On Error Resume Next
     If pres Is Nothing Then Exit Sub
     If Len(pres.Path) = 0 Then Exit Sub
-    target = pres.Path & PathSeparatorOf(pres) & "SciTeXNavigation.failure.txt"
+    target = pres.Path & PathSeparatorOf(pres) & "SciTeX_ToC.failure.txt"
     handle = FreeFile
     Open target For Output As #handle
-    Print #handle, "SciTeXNavigation v" & NAVIGATION_VERSION
+    Print #handle, "SciTeX_ToC v" & TOC_VERSION
     Print #handle, "deck: " & pres.FullName
     Print #handle, "error " & CStr(number) & ": " & description
     Print #handle, "overfull slides: " & mOverfullSlides
     Close #handle
+End Sub
+
+' Check what this run needs BEFORE changing anything, and report all of it.
+'
+' Fail fast and loud, at the operator's request. Two things make this worth a
+' routine rather than letting each step raise where it stands:
+'
+'   IT RUNS FIRST. Once the index is half rebuilt, stopping leaves the deck in
+'   a state neither the operator nor this macro intended. Nothing here writes.
+'
+'   IT COLLECTS. Stopping at the first problem hands back one line, the
+'   operator fixes it, runs again, and meets the next -- a deck with three
+'   things wrong costs three round trips. Every problem is listed at once.
+'
+' What it does NOT check is as deliberate. "The index does not fit at the
+' smallest allowed size" is not invalid input -- it is a real deck the operator
+' may knowingly accept -- so that stays a status-line report, not a refusal.
+Private Sub ValidateDeck(ByVal pres As Presentation)
+    Dim problems As String
+    Dim sld As Slide
+    Dim tocSlides As Long
+    Dim titled As Long
+    Dim hasStatus As Boolean
+    Dim configSlide As Slide
+    Dim minText As String
+    Dim maxText As String
+
+    If Len(pres.Path) = 0 Then
+        problems = problems & vbCrLf & _
+            "- The presentation has never been saved. Save it first: the macro " & _
+            "writes a backup beside the file before it changes anything, and " & _
+            "there is nowhere to put one."
+    End If
+
+    For Each sld In pres.Slides
+        If IsTocSlide(sld) Then
+            tocSlides = tocSlides + 1
+            If TocBodies(sld).Count = 0 Then
+                If FindNamedShape(sld, TOC_BODY_SHAPE) Is Nothing Then
+                    problems = problems & vbCrLf & _
+                        "- Slide " & sld.SlideIndex & " is tagged as an index page but has " & _
+                        "no body shape. Add one named " & TOC_BODY_SHAPE & ", or two or " & _
+                        "more named " & TOC_BODY_PREFIX & "* for columns."
+                End If
+            End If
+        End If
+        If Not FindNamedShape(sld, TITLE_SHAPE) Is Nothing Then titled = titled + 1
+        If Not FindNamedShape(sld, STATUS_SHAPE) Is Nothing Then hasStatus = True
+    Next sld
+
+    If tocSlides = 0 Then
+        problems = problems & vbCrLf & _
+            "- No slide is tagged " & TAG_TOC & ", so there is no index to build."
+    End If
+    If titled = 0 Then
+        problems = problems & vbCrLf & _
+            "- No slide has a shape named " & TITLE_SHAPE & ", so the index would " & _
+            "have nothing to list."
+    End If
+    If Not hasStatus Then
+        problems = problems & vbCrLf & _
+            "- No shape named " & STATUS_SHAPE & " anywhere. The macro reports what " & _
+            "it did there, including any slide whose index did not fit -- without " & _
+            "it those findings have no reader."
+    End If
+
+    Set configSlide = FindConfigSlide(pres)
+    If Not configSlide Is Nothing Then
+        minText = ConfigText(configSlide, CFG_FONT_MIN, "")
+        maxText = ConfigText(configSlide, CFG_FONT_MAX, "")
+        If Len(minText) > 0 And Not IsNumeric(minText) Then
+            problems = problems & vbCrLf & _
+                "- " & CFG_FONT_MIN & " is """ & minText & """, which is not a number."
+        ElseIf Len(minText) > 0 Then
+            If CSng(minText) <= 0 Then problems = problems & vbCrLf & _
+                "- " & CFG_FONT_MIN & " is " & minText & "; it has to be above zero."
+        End If
+        If Len(maxText) > 0 And Not IsNumeric(maxText) Then
+            problems = problems & vbCrLf & _
+                "- " & CFG_FONT_MAX & " is """ & maxText & """, which is not a number."
+        End If
+        If IsNumeric(minText) And IsNumeric(maxText) Then
+            If CSng(minText) > CSng(maxText) Then problems = problems & vbCrLf & _
+                "- " & CFG_FONT_MIN & " (" & minText & ") is larger than " & _
+                CFG_FONT_MAX & " (" & maxText & "), so no size is allowed at all."
+        End If
+    End If
+
+    If Len(problems) = 0 Then Exit Sub
+    Err.Raise vbObjectError + 2119, "ValidateDeck", _
+        "This deck is not ready for SciTeX ToC:" & problems
 End Sub
 
 ' Take a copy before touching anything.
@@ -1299,7 +1404,7 @@ Private Sub SetDisplayedVersion(ByVal pres As Presentation)
     Set configSlide = FindConfigSlide(pres)
     If configSlide Is Nothing Then Exit Sub
     Set versionShape = FindNamedShape(configSlide, CFG_VERSION)
-    If Not versionShape Is Nothing Then versionShape.TextFrame.TextRange.Text = NAVIGATION_VERSION
+    If Not versionShape Is Nothing Then versionShape.TextFrame.TextRange.Text = TOC_VERSION
 End Sub
 
 Private Function ConfigText(ByVal configSlide As Slide, ByVal shapeName As String, ByVal defaultValue As String) As String
@@ -1511,7 +1616,7 @@ End Function
 ' home, and that is where the shipped template puts it -- got no report at all,
 ' silently.
 '
-' That mattered more than a missing line of text. RunSciTeXNavigationOn writes
+' That mattered more than a missing line of text. RefreshToCIn writes
 ' the overfull-slide list here, so on any deck without the shape on slide 1 the
 ' macro would notice that the index did not fit, record it, and then drop the
 ' record on the floor. Measured 2026-08-28: AICHI v18 has no SCITEX_STATUS on
