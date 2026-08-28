@@ -175,6 +175,7 @@ Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
     Dim linkLength As Long
     Dim currentSection As Long
     Dim targetSection As Long
+    Dim position As Long
     Dim leftBody As Shape
     Dim rightBody As Shape
 
@@ -525,6 +526,7 @@ Private Function TitleRoom(ByVal pres As Presentation, ByVal sld As Slide, _
     Dim limit As Single
     Dim titleTop As Single
     Dim titleBottom As Single
+    Dim overlap As Single
 
     limit = pres.PageSetup.SlideWidth
     titleTop = titleShape.Top
@@ -533,8 +535,23 @@ Private Function TitleRoom(ByVal pres As Presentation, ByVal sld As Slide, _
     For Each shp In sld.Shapes
         If shp.Name <> titleShape.Name Then
             If shp.Left > titleShape.Left Then
-                ' vertical overlap, otherwise it is not in the way
-                If shp.Top < titleBottom And (shp.Top + shp.Height) > titleTop Then
+                ' BESIDE, not merely touching. A shape has to share MOST of the
+                ' title's height to be in its way; clipping the last few points
+                ' of it means the shape sits BELOW and the title may run over
+                ' the top of it.
+                '
+                ' Any overlap at all was the first rule, and it collapsed four
+                ' titles. Measured 2026-08-28 on AICHI v18 slides 40-43 -- the
+                ' product and pricing pages: the title spans y 7.4 to 48.0 and
+                ' the caption under it starts at 43.1, so they share 4.9pt of
+                ' a 40.6pt title. That caption was read as a neighbour, room
+                ' came out as 14.8 - 7.1 = 7.7pt, and titleShape.Width was set
+                ' to it -- 687.2pt boxes became 4.8pt, wrapping one short title
+                ' onto a dozen lines.
+                '
+                ' Half is not a tuned threshold; it is what "beside" means.
+                overlap = TitleOverlap(titleTop, titleBottom, shp)
+                If overlap * 2 > titleShape.Height Then
                     If shp.Left < limit Then limit = shp.Left
                 End If
             End If
@@ -551,6 +568,21 @@ End Function
 ' ragged left edge down the whole index. A tab stop is absolute: every title
 ' starts at the same x regardless of what the prefix measures, and that x is
 ' the widest prefix in the column -- measured, not written in.
+' How much of the title's vertical band a shape actually covers.
+Private Function TitleOverlap(ByVal titleTop As Single, ByVal titleBottom As Single, _
+                              ByVal shp As Shape) As Single
+    Dim topMost As Single
+    Dim bottomMost As Single
+
+    topMost = shp.Top
+    If titleTop > topMost Then topMost = titleTop
+    bottomMost = shp.Top + shp.Height
+    If titleBottom < bottomMost Then bottomMost = titleBottom
+
+    TitleOverlap = bottomMost - topMost
+    If TitleOverlap < 0 Then TitleOverlap = 0
+End Function
+
 Private Function NavigationEntryText(ByVal sld As Slide) As String
     If IsTocSlide(sld) Then
         NavigationEntryText = SlideTag(sld, TAG_NAV_CODE) & "." & vbTab & SlideTag(sld, TAG_SECTION_TITLE)
@@ -609,6 +641,7 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
     Dim targetIndex As Long
     Dim lineNumber As Long
     Dim targetSection As Long
+    Dim position As Long
     Dim splitAfter As Long
     Dim paragraphRange As TextRange
     Dim linkRange As TextRange
@@ -624,8 +657,9 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
     For targetIndex = 1 To pres.Slides.Count
         Set target = pres.Slides(targetIndex)
         If ShouldIncludeInToc(target) Then
+            position = position + 1
             targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
-            If BelongsInColumn(targetSection, isLeftColumn, splitAfter) Then
+            If BelongsInColumn(position, isLeftColumn, splitAfter) Then
                 lineNumber = lineNumber + 1
                 Set paragraphRange = body.TextFrame.TextRange.Paragraphs(lineNumber, 1)
                 Set linkRange = EntryRange(paragraphRange)
@@ -662,6 +696,7 @@ Private Sub PlaceTocLinkOverlays(ByVal pres As Presentation, ByVal tocSlide As S
     Dim targetIndex As Long
     Dim lineNumber As Long
     Dim targetSection As Long
+    Dim position As Long
 
     If body.TextFrame.HasText <> msoTrue Then Exit Sub
 
@@ -669,8 +704,9 @@ Private Sub PlaceTocLinkOverlays(ByVal pres As Presentation, ByVal tocSlide As S
     For targetIndex = 1 To pres.Slides.Count
         Set target = pres.Slides(targetIndex)
         If ShouldIncludeInToc(target) Then
+            position = position + 1
             targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
-            If BelongsInColumn(targetSection, isLeftColumn, splitAfter) Then
+            If BelongsInColumn(position, isLeftColumn, splitAfter) Then
                 lineNumber = lineNumber + 1
                 AddTocLinkOverlay tocSlide, _
                     body.TextFrame.TextRange.Paragraphs(lineNumber, 1), _
@@ -928,7 +964,7 @@ Private Function PlanColumns(ByVal pres As Presentation, ByVal tocSlide As Slide
     Dim bestSize As Single
     Dim fits As Boolean
 
-    highest = HighestSection(pres)
+    highest = EntryCount(pres)
     If highest <= 1 Then
         mPlannedSize = mFontMax
         PlanColumns = 1
@@ -1012,15 +1048,12 @@ Private Function LargestFittingCut(ByVal pres As Presentation, ByVal tocSlide As
     LargestFittingCut = best
 End Function
 
-Private Function HighestSection(ByVal pres As Presentation) As Long
+' How many entries the index carries -- the search space for the cut.
+Private Function EntryCount(ByVal pres As Presentation) As Long
     Dim sld As Slide
-    Dim section As Long
 
     For Each sld In pres.Slides
-        If ShouldIncludeInToc(sld) Then
-            section = CLng(Val(SlideTag(sld, TAG_NAV_CODE)))
-            If section > HighestSection Then HighestSection = section
-        End If
+        If ShouldIncludeInToc(sld) Then EntryCount = EntryCount + 1
     Next sld
 End Function
 
@@ -1064,6 +1097,7 @@ Private Function LayOutColumn(ByVal pres As Presentation, ByVal body As Shape, _
     Dim target As Slide
     Dim targetIndex As Long
     Dim targetSection As Long
+    Dim position As Long
     Dim tocText As String
     Dim lineNumber As Long
     Dim paragraphRange As TextRange
@@ -1071,8 +1105,9 @@ Private Function LayOutColumn(ByVal pres As Presentation, ByVal body As Shape, _
     For targetIndex = 1 To pres.Slides.Count
         Set target = pres.Slides(targetIndex)
         If ShouldIncludeInToc(target) Then
+            position = position + 1
             targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
-            If BelongsInColumn(targetSection, isLeftColumn, splitAfter) Then
+            If BelongsInColumn(position, isLeftColumn, splitAfter) Then
                 If Len(tocText) > 0 Then tocText = tocText & vbCrLf
                 tocText = tocText & NavigationEntryText(target)
                 LayOutColumn = LayOutColumn + 1
@@ -1090,11 +1125,13 @@ Private Function LayOutColumn(ByVal pres As Presentation, ByVal body As Shape, _
     body.TextFrame.TextRange.Font.Underline = msoFalse
 
     lineNumber = 0
+    position = 0
     For targetIndex = 1 To pres.Slides.Count
         Set target = pres.Slides(targetIndex)
         If ShouldIncludeInToc(target) Then
+            position = position + 1
             targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
-            If BelongsInColumn(targetSection, isLeftColumn, splitAfter) Then
+            If BelongsInColumn(position, isLeftColumn, splitAfter) Then
                 lineNumber = lineNumber + 1
                 Set paragraphRange = body.TextFrame.TextRange.Paragraphs(lineNumber, 1)
                 If IsTocSlide(target) Then
@@ -1113,12 +1150,24 @@ Private Function LayOutColumn(ByVal pres As Presentation, ByVal body As Shape, _
     SetPrefixTabStop body
 End Function
 
-Private Function BelongsInColumn(ByVal section As Long, ByVal isLeftColumn As Boolean, _
+' Which column an entry belongs to, by its POSITION in the index.
+'
+' The cut used to be a SECTION boundary, which cannot balance a deck whose
+' sections differ in size. Measured 2026-08-28 with every hidden slide shown
+' (54 entries): section 3 alone holds 21, so cutting after section 2 leaves 10
+' entries on the left and 44 on the right, while cutting after section 3 puts
+' 30 left. There is nothing in between, so the search took 10/44 and 135 index
+' shapes ran off the page. The operator predicted this before it was measured:
+' "I have not checked what happens when slides are added."
+'
+' A position can fall anywhere, including inside a section -- which is also
+' what "fill from the top left, then carry on down the right" actually means.
+Private Function BelongsInColumn(ByVal position As Long, ByVal isLeftColumn As Boolean, _
                                  ByVal splitAfter As Long) As Boolean
     If isLeftColumn Then
-        BelongsInColumn = (section <= splitAfter)
+        BelongsInColumn = (position <= splitAfter)
     Else
-        BelongsInColumn = (section > splitAfter)
+        BelongsInColumn = (position > splitAfter)
     End If
 End Function
 
