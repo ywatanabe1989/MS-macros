@@ -190,10 +190,16 @@ Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
         NormaliseTocBoxes pres, leftBody, rightBody
         RebuildTocColumn pres, tocSlide, leftBody, True, currentSection
         RebuildTocColumn pres, tocSlide, rightBody, False, currentSection
+        FitTocBody leftBody
+        FitTocBody rightBody
         ' Both columns are laid out at the planned size, so this is a backstop
         ' rather than a correction: if FitTocBody had to shrink one of them,
         ' two sizes of the same list reads as a mistake even when both fit.
         MatchColumnSizes leftBody, rightBody
+
+        ' Last, once nothing will move the text again. See PlaceTocLinkOverlays.
+        PlaceTocLinkOverlays pres, tocSlide, leftBody, True, ColumnSplit(pres, tocSlide)
+        PlaceTocLinkOverlays pres, tocSlide, rightBody, False, ColumnSplit(pres, tocSlide)
         Exit Sub
     End If
 
@@ -631,16 +637,47 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
                     linkRange.Font.Color.RGB = RGB(170, 179, 188)
                     paragraphRange.Font.Color.RGB = RGB(170, 179, 188)
                 End If
-                AddTocLinkOverlay tocSlide, paragraphRange, target, IIf(isLeftColumn, "L", "R"), lineNumber
             End If
         End If
     Next targetIndex
+End Sub
 
-    ' A last check that the finished column really is inside its box. The
-    ' planner measured this exact layout, so this should never shrink anything.
-    ' If it does, the measurement and the render have drifted apart, and the
-    ' status line says which slide.
-    FitTocBody body
+' Put the clickable rectangles on, AFTER the type has stopped moving.
+'
+' These are separate SHAPES positioned from where each paragraph currently sits.
+' Nothing repositions them later, so placing them during the build pins them to
+' an intermediate layout: every later step -- MatchColumnSizes settling both
+' columns on one size, SetPrefixTabStop changing the hanging indent and so the
+' wrapping, FitTocBody shrinking to fit -- moves the text out from under them.
+'
+' Measured 2026-08-28 on AICHI v18: the text ended correctly at 529.2pt on a
+' 540pt slide while the last overlays sat at 621, 647 and 671 -- up to 131pt
+' off the page. The first repair re-fitted the TEXT and still left the overlays
+' where they were, because it treated a stale-placement bug as a sizing bug.
+' The two look identical in the report and are not the same defect.
+Private Sub PlaceTocLinkOverlays(ByVal pres As Presentation, ByVal tocSlide As Slide, _
+                                 ByVal body As Shape, ByVal isLeftColumn As Boolean, _
+                                 ByVal splitAfter As Long)
+    Dim target As Slide
+    Dim targetIndex As Long
+    Dim lineNumber As Long
+    Dim targetSection As Long
+
+    If body.TextFrame.HasText <> msoTrue Then Exit Sub
+
+    lineNumber = 0
+    For targetIndex = 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        If ShouldIncludeInToc(target) Then
+            targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
+            If BelongsInColumn(targetSection, isLeftColumn, splitAfter) Then
+                lineNumber = lineNumber + 1
+                AddTocLinkOverlay tocSlide, _
+                    body.TextFrame.TextRange.Paragraphs(lineNumber, 1), _
+                    target, IIf(isLeftColumn, "L", "R"), lineNumber
+            End If
+        End If
+    Next targetIndex
 End Sub
 
 ' One tab stop, placed where the widest prefix actually ends.
