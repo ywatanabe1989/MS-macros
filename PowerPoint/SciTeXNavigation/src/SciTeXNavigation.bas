@@ -1,14 +1,14 @@
 Attribute VB_Name = "SciTeXNavigation"
 Option Explicit
 
-Private Const NAVIGATION_VERSION As String = "0.3.0"
+Private Const NAVIGATION_VERSION As String = "0.4.0"
 Private Const TAG_CONFIG As String = "SCITEX_CONFIG"
 Private Const TAG_COVER As String = "SCITEX_COVER"
 Private Const TAG_TOC As String = "SCITEX_TOC"
 Private Const TAG_SECTION_TITLE As String = "SCITEX_SECTION_TITLE"
 Private Const TAG_NAV_CODE As String = "SCITEX_NAV_CODE"
 Private Const TAG_CURRENT_SECTION As String = "SCITEX_CURRENT_SECTION"
-Private Const TAG_TOC_SPLIT_AFTER As String = "SCITEX_TOC_SPLIT_AFTER"
+Private Const TAG_TOC_SPLIT_AFTER As String = "SCITEX_TOC_SPLIT_AFTER"  ' read only to delete it
 Private Const TITLE_SHAPE As String = "SCITEX_TITLE"
 Private Const TOC_BODY_SHAPE As String = "SCITEX_TOC_BODY"
 Private Const TOC_BODY_LEFT As String = "SCITEX_TOC_BODY_LEFT"
@@ -30,6 +30,7 @@ Private mFontMax As Single
 Private mBackupPath As String
 Private mSplitCached As Long
 Private mSplitSlideIndex As Long
+Private mPlannedSize As Single
 Private mOverfullSlides As String
 Private mHideHiddenFromToc As Boolean
 Private mTwoColumnToc As Boolean
@@ -142,9 +143,9 @@ Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
         NormaliseTocBoxes pres, leftBody, rightBody
         RebuildTocColumn pres, tocSlide, leftBody, True, currentSection
         RebuildTocColumn pres, tocSlide, rightBody, False, currentSection
-        ' Each column was fitted on its own, so the taller one ends up smaller.
-        ' Two columns of the same list at two different sizes reads as a
-        ' mistake even when both fit, so settle them on the smaller of the two.
+        ' Both columns are laid out at the planned size, so this is a backstop
+        ' rather than a correction: if FitTocBody had to shrink one of them,
+        ' two sizes of the same list reads as a mistake even when both fit.
         MatchColumnSizes leftBody, rightBody
         Exit Sub
     End If
@@ -538,51 +539,27 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
     Dim target As Slide
     Dim targetIndex As Long
     Dim lineNumber As Long
-    Dim tocText As String
-    Dim navigationCode As String
     Dim targetSection As Long
     Dim splitAfter As Long
     Dim paragraphRange As TextRange
     Dim linkRange As TextRange
-    Dim linkLength As Long
 
-    splitAfter = CLng(Val(SlideTag(tocSlide, TAG_TOC_SPLIT_AFTER)))
-    If splitAfter <= 0 Then splitAfter = ColumnSplit(pres, tocSlide)
-    tocText = ""
+    ' The cut is measured, never stored. A written-in split is the defect this
+    ' version removes, so a leftover tag is cleared rather than obeyed.
+    DeleteSlideTag tocSlide, TAG_TOC_SPLIT_AFTER
+    splitAfter = ColumnSplit(pres, tocSlide)
 
-    For targetIndex = 1 To pres.Slides.Count
-        Set target = pres.Slides(targetIndex)
-        navigationCode = SlideTag(target, TAG_NAV_CODE)
-        If ShouldIncludeInToc(target) Then
-            targetSection = CLng(Val(navigationCode))
-            If (isLeftColumn And targetSection <= splitAfter) Or (Not isLeftColumn And targetSection > splitAfter) Then
-                If Len(tocText) > 0 Then tocText = tocText & vbCrLf
-                tocText = tocText & NavigationEntryText(target)
-            End If
-        End If
-    Next targetIndex
-
-    body.TextFrame.TextRange.Text = tocText
-    body.TextFrame.TextRange.Font.Bold = msoFalse
-    body.TextFrame.TextRange.Font.Underline = msoFalse
-    ' The hanging indent and the tab stop are the same measurement, so one
-    ' routine owns both. Setting them apart is how they drift.
-    SetPrefixTabStop body
+    If LayOutColumn(pres, body, isLeftColumn, splitAfter, mPlannedSize) = 0 Then Exit Sub
 
     lineNumber = 0
     For targetIndex = 1 To pres.Slides.Count
         Set target = pres.Slides(targetIndex)
-        navigationCode = SlideTag(target, TAG_NAV_CODE)
         If ShouldIncludeInToc(target) Then
-            targetSection = CLng(Val(navigationCode))
-            If (isLeftColumn And targetSection <= splitAfter) Or (Not isLeftColumn And targetSection > splitAfter) Then
+            targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
+            If BelongsInColumn(targetSection, isLeftColumn, splitAfter) Then
                 lineNumber = lineNumber + 1
                 Set paragraphRange = body.TextFrame.TextRange.Paragraphs(lineNumber, 1)
-                linkLength = Len(paragraphRange.Text)
-                Do While linkLength > 0 And (Mid$(paragraphRange.Text, linkLength, 1) = vbCr Or Mid$(paragraphRange.Text, linkLength, 1) = vbLf)
-                    linkLength = linkLength - 1
-                Loop
-                Set linkRange = paragraphRange.Characters(1, linkLength)
+                Set linkRange = EntryRange(paragraphRange)
                 ClearTextHyperlink linkRange
                 If targetSection = currentSection Then
                     linkRange.Font.Color.RGB = RGB(27, 38, 53)
@@ -591,26 +568,15 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
                     linkRange.Font.Color.RGB = RGB(170, 179, 188)
                     paragraphRange.Font.Color.RGB = RGB(170, 179, 188)
                 End If
-                If IsTocSlide(target) Then
-                    paragraphRange.IndentLevel = 1
-                    paragraphRange.Font.Bold = msoFalse
-                    paragraphRange.Font.Underline = msoFalse
-                    linkRange.Font.Bold = msoTrue
-                    linkRange.Font.Underline = msoTrue
-                Else
-                    paragraphRange.IndentLevel = 2
-                    linkRange.Font.Bold = msoFalse
-                    paragraphRange.Font.Bold = msoFalse
-                    linkRange.Font.Underline = msoFalse
-                    paragraphRange.Font.Underline = msoFalse
-                End If
                 AddTocLinkOverlay tocSlide, paragraphRange, target, IIf(isLeftColumn, "L", "R"), lineNumber
             End If
         End If
     Next targetIndex
 
-    ' After the text is final, not before: the size depends on how many lines
-    ' the finished column actually has.
+    ' A last check that the finished column really is inside its box. The
+    ' planner measured this exact layout, so this should never shrink anything.
+    ' If it does, the measurement and the render have drifted apart, and the
+    ' status line says which slide.
     FitTocBody body
 End Sub
 
@@ -701,18 +667,19 @@ End Function
 Private Sub FitTocBody(ByVal body As Shape)
     Dim bodyRange As TextRange
     Dim targetSize As Single
+    Dim startSize As Single
     Dim available As Single
 
     If body.TextFrame.HasText <> msoTrue Then Exit Sub
 
     body.TextFrame2.AutoSize = msoAutoSizeNone
     body.TextFrame.WordWrap = msoTrue
-    available = body.Height - body.TextFrame.MarginTop - body.TextFrame.MarginBottom
-    If available <= 0 Then Err.Raise vbObjectError + 2115, , "TOC body " & body.Name & " has no usable height."
+    available = UsableHeight(body)
 
     Set bodyRange = body.TextFrame.TextRange
-    targetSize = bodyRange.Characters(1, 1).Font.Size
-    If targetSize > mFontMax Then targetSize = mFontMax
+    targetSize = mPlannedSize
+    If targetSize <= 0 Or targetSize > mFontMax Then targetSize = mFontMax
+    startSize = targetSize
     bodyRange.Font.Size = targetSize
 
     Do While bodyRange.BoundHeight > available And targetSize > mFontMin
@@ -720,6 +687,10 @@ Private Sub FitTocBody(ByVal body As Shape)
         If targetSize < mFontMin Then targetSize = mFontMin
         bodyRange.Font.Size = targetSize
     Loop
+
+    ' The tab stop was measured at the planned size. If this had to shrink, the
+    ' stop is stale and the prefixes go ragged -- the original complaint.
+    If targetSize < startSize Then SetPrefixTabStop body
 
     If bodyRange.BoundHeight > available Then NoteOverfull body.Parent
 End Sub
@@ -742,25 +713,29 @@ Private Sub NoteOverfull(ByVal sld As Slide)
     mOverfullSlides = mOverfullSlides & label
 End Sub
 
-' Where to cut the index so the two columns come out even.
+' Where to cut the index, and at what size.
 '
-' Counting ENTRIES is not enough, and v18 shows why: the two boxes are not the
-' same shape. Left is 363.6pt wide, right is 291.6pt, so the same entry wraps
-' to two lines on the right and one on the left. An even count still leaves one
-' column visibly fuller.
+' The rule the deck has to satisfy is one thing: every entry is on the slide.
+' Not "the two columns look even" -- that was this routine's objective until
+' 2026-08-28 and it was the wrong one. Even-looking columns with the last entry
+' hanging below the slide edge is a failure; a lopsided pair with everything
+' visible is not.
 '
-' What has to come out even is the HEIGHT the text occupies. So try each cut,
-' put the real text in both boxes, ask PowerPoint how tall each column came out,
-' and keep the cut whose two heights are closest. That is a measurement of the
-' thing we actually care about rather than a proxy for it.
+' So fill from the top of the left column, keep going while it still fits, and
+' send the remainder right. Shrink the type only when no cut fits at the current
+' size, because small type is a cost to accept last, not a knob to turn first.
 '
-' Costs one fill-and-measure per section boundary -- single digits on any real
-' deck, and it runs once per index slide.
-' The cut for this index slide, measured once and reused by both columns.
+' Largest size first, and within a size the largest left column, is a search
+' over (size, cut). Two facts make it cheap:
 '
-' RebuildTocColumn is called per column, so without this each column would
-' compute the split independently -- twice the work, and nothing guaranteeing
-' the two answers agree.
+'   - the left column only grows as the cut moves down, so at a fixed size the
+'     largest workable cut is the first fit walking down from the top;
+'   - moving the cut back up to help the right column makes the right column
+'     BIGGER, not smaller. Once the left fits and the right does not, no other
+'     cut at this size will do either -- drop a size instead.
+'
+' That turns a (sizes x cuts) grid into one walk per size, exiting at the first
+' size that works.
 Private Function ColumnSplit(ByVal pres As Presentation, ByVal tocSlide As Slide) As Long
     Dim leftBody As Shape
     Dim rightBody As Shape
@@ -772,92 +747,200 @@ Private Function ColumnSplit(ByVal pres As Presentation, ByVal tocSlide As Slide
 
     Set leftBody = FindNamedShape(tocSlide, TOC_BODY_LEFT)
     Set rightBody = FindNamedShape(tocSlide, TOC_BODY_RIGHT)
+    ' No fallback cut here. A guessed number that renders without complaint is
+    ' exactly the failure this rewrite removes.
     If leftBody Is Nothing Or rightBody Is Nothing Then
-        ColumnSplit = 3
-        Exit Function
+        Err.Raise vbObjectError + 2117, , _
+            "Index slide " & tocSlide.SlideIndex & " is missing a column body shape."
     End If
 
-    mSplitCached = BalancedSplitAfter(pres, tocSlide, leftBody, rightBody)
+    mSplitCached = PlanColumns(pres, tocSlide, leftBody, rightBody)
     mSplitSlideIndex = tocSlide.SlideIndex
     ColumnSplit = mSplitCached
 End Function
 
-Private Function BalancedSplitAfter(ByVal pres As Presentation, _
-                                    ByVal tocSlide As Slide, _
-                                    ByVal leftBody As Shape, _
-                                    ByVal rightBody As Shape) As Long
+' Settle the size and the cut together, since neither is decidable alone.
+' Records the size in mPlannedSize for the columns to use; returns the cut.
+Private Function PlanColumns(ByVal pres As Presentation, ByVal tocSlide As Slide, _
+                             ByVal leftBody As Shape, ByVal rightBody As Shape) As Long
     Dim highest As Long
-    Dim candidate As Long
-    Dim best As Long
-    Dim bestGap As Single
-    Dim gap As Single
-    Dim leftHeight As Single
-    Dim rightHeight As Single
+    Dim trySize As Single
+    Dim cut As Long
+    Dim fittingCut As Long
+    Dim leftRoom As Single
+    Dim rightRoom As Single
+
+    highest = HighestSection(pres)
+    If highest <= 1 Then
+        mPlannedSize = mFontMax
+        PlanColumns = 1
+        Exit Function
+    End If
+
+    leftRoom = UsableHeight(leftBody)
+    rightRoom = UsableHeight(rightBody)
+
+    trySize = mFontMax
+    Do While trySize >= mFontMin
+        fittingCut = LargestFittingCut(pres, tocSlide, leftBody, highest, trySize, leftRoom)
+        If fittingCut > 0 Then
+            If ColumnHeightAt(pres, tocSlide, rightBody, False, fittingCut, trySize) <= rightRoom Then
+                mPlannedSize = trySize
+                PlanColumns = fittingCut
+                Exit Function
+            End If
+        End If
+        trySize = trySize - 0.5
+    Loop
+
+    ' Nothing fits even at the smallest size the config allows. Name the slide
+    ' on the status line rather than cropping quietly, and give the left column
+    ' as much as it can hold so the overflow is at one end instead of both.
+    mPlannedSize = mFontMin
+    NoteOverfull tocSlide
+    fittingCut = LargestFittingCut(pres, tocSlide, leftBody, highest, mFontMin, leftRoom)
+    If fittingCut <= 0 Then fittingCut = 1
+    PlanColumns = fittingCut
+End Function
+
+' The lowest cut whose left column still fits, or 0 if none does.
+Private Function LargestFittingCut(ByVal pres As Presentation, ByVal tocSlide As Slide, _
+                                   ByVal leftBody As Shape, ByVal highest As Long, _
+                                   ByVal fontSize As Single, ByVal room As Single) As Long
+    Dim cut As Long
+
+    For cut = highest - 1 To 1 Step -1
+        If ColumnHeightAt(pres, tocSlide, leftBody, True, cut, fontSize) <= room Then
+            LargestFittingCut = cut
+            Exit Function
+        End If
+    Next cut
+    LargestFittingCut = 0
+End Function
+
+Private Function HighestSection(ByVal pres As Presentation) As Long
     Dim sld As Slide
     Dim section As Long
 
     For Each sld In pres.Slides
         If ShouldIncludeInToc(sld) Then
             section = CLng(Val(SlideTag(sld, TAG_NAV_CODE)))
-            If section > highest Then highest = section
+            If section > HighestSection Then HighestSection = section
         End If
     Next sld
-
-    If highest <= 1 Then
-        BalancedSplitAfter = 1
-        Exit Function
-    End If
-
-    best = 1
-    bestGap = -1
-    For candidate = 1 To highest - 1
-        leftHeight = MeasureColumn(pres, leftBody, True, candidate)
-        rightHeight = MeasureColumn(pres, rightBody, False, candidate)
-        ' A cut that empties a column is not a two-column layout.
-        If leftHeight > 0 And rightHeight > 0 Then
-            gap = Abs(leftHeight - rightHeight)
-            If bestGap < 0 Or gap < bestGap Then
-                bestGap = gap
-                best = candidate
-            End If
-        End If
-    Next candidate
-
-    BalancedSplitAfter = best
 End Function
 
-' Fill one column for a trial cut and report how tall the text came out.
+' The height the text may occupy, which is not the height of the box.
+Private Function UsableHeight(ByVal body As Shape) As Single
+    UsableHeight = body.Height - body.TextFrame.MarginTop - body.TextFrame.MarginBottom
+    If UsableHeight <= 0 Then Err.Raise vbObjectError + 2115, , _
+        "Index body " & body.Name & " has no usable height."
+End Function
+
+' Fill one column for a trial cut at a trial size and report how tall it came out.
 '
-' The text written here is thrown away -- RebuildTocColumn writes the real
-' thing, with links and colours, straight after. This only needs the same
-' CHARACTERS so the measurement matches.
-Private Function MeasureColumn(ByVal pres As Presentation, ByVal body As Shape, _
-                               ByVal isLeftColumn As Boolean, _
-                               ByVal splitAfter As Long) As Single
+' This goes through LayOutColumn, the same routine that builds the real column,
+' because a trial that skips the indent, the weight or the tab stop measures a
+' column that will never be rendered -- and reports a fit for text that then
+' hangs off the slide. The trial text is thrown away; RebuildTocColumn writes
+' the final one with colours and links straight after.
+Private Function ColumnHeightAt(ByVal pres As Presentation, ByVal tocSlide As Slide, _
+                                ByVal body As Shape, ByVal isLeftColumn As Boolean, _
+                                ByVal splitAfter As Long, ByVal fontSize As Single) As Single
+    If LayOutColumn(pres, body, isLeftColumn, splitAfter, fontSize) = 0 Then
+        ColumnHeightAt = 0
+        Exit Function
+    End If
+    ColumnHeightAt = body.TextFrame.TextRange.BoundHeight
+End Function
+
+' Write one column's entries and give them the shape they will have on the
+' slide: size, weight, indent level, tab stop. Returns the entry count.
+'
+' Trial fills and the final build both come through here. Keeping one routine
+' is what makes the measurement above trustworthy -- when this changes, what
+' was measured changes with it.
+'
+' Order matters. The weight is applied BEFORE the tab stop is measured, because
+' a section line's prefix is bold and a stop measured on the regular weight
+' lands short of it.
+Private Function LayOutColumn(ByVal pres As Presentation, ByVal body As Shape, _
+                              ByVal isLeftColumn As Boolean, ByVal splitAfter As Long, _
+                              ByVal fontSize As Single) As Long
     Dim target As Slide
     Dim targetIndex As Long
     Dim targetSection As Long
-    Dim trialText As String
+    Dim tocText As String
+    Dim lineNumber As Long
+    Dim paragraphRange As TextRange
 
     For targetIndex = 1 To pres.Slides.Count
         Set target = pres.Slides(targetIndex)
         If ShouldIncludeInToc(target) Then
             targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
-            If (isLeftColumn And targetSection <= splitAfter) Or _
-               (Not isLeftColumn And targetSection > splitAfter) Then
-                If Len(trialText) > 0 Then trialText = trialText & vbCrLf
-                trialText = trialText & NavigationEntryText(target)
+            If BelongsInColumn(targetSection, isLeftColumn, splitAfter) Then
+                If Len(tocText) > 0 Then tocText = tocText & vbCrLf
+                tocText = tocText & NavigationEntryText(target)
+                LayOutColumn = LayOutColumn + 1
             End If
         End If
     Next targetIndex
 
-    If Len(trialText) = 0 Then
-        MeasureColumn = 0
-        Exit Function
-    End If
+    body.TextFrame2.AutoSize = msoAutoSizeNone
+    body.TextFrame.WordWrap = msoTrue
+    body.TextFrame.TextRange.text = tocText
+    If LayOutColumn = 0 Then Exit Function
 
-    body.TextFrame.TextRange.text = trialText
-    MeasureColumn = body.TextFrame.TextRange.BoundHeight
+    body.TextFrame.TextRange.Font.Size = fontSize
+    body.TextFrame.TextRange.Font.Bold = msoFalse
+    body.TextFrame.TextRange.Font.Underline = msoFalse
+
+    lineNumber = 0
+    For targetIndex = 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        If ShouldIncludeInToc(target) Then
+            targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
+            If BelongsInColumn(targetSection, isLeftColumn, splitAfter) Then
+                lineNumber = lineNumber + 1
+                Set paragraphRange = body.TextFrame.TextRange.Paragraphs(lineNumber, 1)
+                If IsTocSlide(target) Then
+                    paragraphRange.IndentLevel = 1
+                    EntryRange(paragraphRange).Font.Bold = msoTrue
+                    EntryRange(paragraphRange).Font.Underline = msoTrue
+                Else
+                    paragraphRange.IndentLevel = 2
+                End If
+            End If
+        End If
+    Next targetIndex
+
+    ' The hanging indent and the tab stop are the same measurement, so one
+    ' routine owns both. Setting them apart is how they drift.
+    SetPrefixTabStop body
+End Function
+
+Private Function BelongsInColumn(ByVal section As Long, ByVal isLeftColumn As Boolean, _
+                                 ByVal splitAfter As Long) As Boolean
+    If isLeftColumn Then
+        BelongsInColumn = (section <= splitAfter)
+    Else
+        BelongsInColumn = (section > splitAfter)
+    End If
+End Function
+
+' A paragraph without its trailing newline. Styling the newline is what leaves
+' an underline running past the end of a line.
+Private Function EntryRange(ByVal paragraphRange As TextRange) As TextRange
+    Dim entryLength As Long
+    Dim lastCharacter As String
+
+    entryLength = Len(paragraphRange.text)
+    Do While entryLength > 0
+        lastCharacter = Mid$(paragraphRange.text, entryLength, 1)
+        If lastCharacter <> vbCr And lastCharacter <> vbLf Then Exit Do
+        entryLength = entryLength - 1
+    Loop
+    Set EntryRange = paragraphRange.Characters(1, entryLength)
 End Function
 
 ' Give both columns the same vertical band before anything is measured.
