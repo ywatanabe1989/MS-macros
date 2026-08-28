@@ -28,6 +28,8 @@ Private mFontCjk As String
 Private mFontMin As Single
 Private mFontMax As Single
 Private mBackupPath As String
+Private mSplitCached As Long
+Private mSplitSlideIndex As Long
 Private mOverfullSlides As String
 Private mHideHiddenFromToc As Boolean
 Private mTwoColumnToc As Boolean
@@ -42,6 +44,8 @@ Public Sub RunSciTeXNavigation()
 
     Set pres = ActivePresentation
     mOverfullSlides = ""
+    mSplitCached = 0
+    mSplitSlideIndex = 0
     BackupBeforeRun pres
     LoadConfiguration pres
     SetDisplayedVersion pres
@@ -133,6 +137,9 @@ Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
         Set rightBody = FindNamedShape(tocSlide, TOC_BODY_RIGHT)
         If leftBody Is Nothing Or rightBody Is Nothing Then Err.Raise vbObjectError + 2100, , "Two-column TOC requires left and right body shapes."
         currentSection = CLng(Val(SlideTag(tocSlide, TAG_NAV_CODE)))
+        ' Same band for both columns before anything is measured, or the
+        ' measurement answers a question about box sizes instead of text.
+        NormaliseTocBoxes pres, leftBody, rightBody
         RebuildTocColumn pres, tocSlide, leftBody, True, currentSection
         RebuildTocColumn pres, tocSlide, rightBody, False, currentSection
         ' Each column was fitted on its own, so the taller one ends up smaller.
@@ -540,7 +547,7 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
     Dim linkLength As Long
 
     splitAfter = CLng(Val(SlideTag(tocSlide, TAG_TOC_SPLIT_AFTER)))
-    If splitAfter <= 0 Then splitAfter = BalancedSplitAfter(pres)
+    If splitAfter <= 0 Then splitAfter = ColumnSplit(pres, tocSlide)
     tocText = ""
 
     For targetIndex = 1 To pres.Slides.Count
@@ -737,56 +744,157 @@ End Sub
 
 ' Where to cut the index so the two columns come out even.
 '
-' The split used to be a number someone had to know and keep current. It goes
-' stale the moment a section is added: AICHI v18 still carried 5 from a
-' five-section deck, and with nine sections that put 23 entries in the left
-' column against 9 in the right -- which is also what pushed the left column
-' off the bottom of the slide.
+' Counting ENTRIES is not enough, and v18 shows why: the two boxes are not the
+' same shape. Left is 363.6pt wide, right is 291.6pt, so the same entry wraps
+' to two lines on the right and one on the left. An even count still leaves one
+' column visibly fuller.
 '
-' Counting the entries and picking the cut that minimises the difference needs
-' no maintenance. The tag still wins when it is set, so a deck that wants an
-' uneven split on purpose keeps it.
-Private Function BalancedSplitAfter(ByVal pres As Presentation) As Long
-    Dim counts(1 To 64) As Long
+' What has to come out even is the HEIGHT the text occupies. So try each cut,
+' put the real text in both boxes, ask PowerPoint how tall each column came out,
+' and keep the cut whose two heights are closest. That is a measurement of the
+' thing we actually care about rather than a proxy for it.
+'
+' Costs one fill-and-measure per section boundary -- single digits on any real
+' deck, and it runs once per index slide.
+' The cut for this index slide, measured once and reused by both columns.
+'
+' RebuildTocColumn is called per column, so without this each column would
+' compute the split independently -- twice the work, and nothing guaranteeing
+' the two answers agree.
+Private Function ColumnSplit(ByVal pres As Presentation, ByVal tocSlide As Slide) As Long
+    Dim leftBody As Shape
+    Dim rightBody As Shape
+
+    If mSplitSlideIndex = tocSlide.SlideIndex And mSplitCached > 0 Then
+        ColumnSplit = mSplitCached
+        Exit Function
+    End If
+
+    Set leftBody = FindNamedShape(tocSlide, TOC_BODY_LEFT)
+    Set rightBody = FindNamedShape(tocSlide, TOC_BODY_RIGHT)
+    If leftBody Is Nothing Or rightBody Is Nothing Then
+        ColumnSplit = 3
+        Exit Function
+    End If
+
+    mSplitCached = BalancedSplitAfter(pres, tocSlide, leftBody, rightBody)
+    mSplitSlideIndex = tocSlide.SlideIndex
+    ColumnSplit = mSplitCached
+End Function
+
+Private Function BalancedSplitAfter(ByVal pres As Presentation, _
+                                    ByVal tocSlide As Slide, _
+                                    ByVal leftBody As Shape, _
+                                    ByVal rightBody As Shape) As Long
     Dim highest As Long
-    Dim total As Long
+    Dim candidate As Long
+    Dim best As Long
+    Dim bestGap As Single
+    Dim gap As Single
+    Dim leftHeight As Single
+    Dim rightHeight As Single
     Dim sld As Slide
     Dim section As Long
-    Dim candidate As Long
-    Dim leftCount As Long
-    Dim best As Long
-    Dim bestGap As Long
-    Dim gap As Long
 
     For Each sld In pres.Slides
         If ShouldIncludeInToc(sld) Then
             section = CLng(Val(SlideTag(sld, TAG_NAV_CODE)))
-            If section >= 1 And section <= 64 Then
-                counts(section) = counts(section) + 1
-                total = total + 1
-                If section > highest Then highest = section
-            End If
+            If section > highest Then highest = section
         End If
     Next sld
 
-    If highest = 0 Then
-        BalancedSplitAfter = 3
+    If highest <= 1 Then
+        BalancedSplitAfter = 1
         Exit Function
     End If
 
     best = 1
-    bestGap = total + 1
-    leftCount = 0
-    For candidate = 1 To highest
-        leftCount = leftCount + counts(candidate)
-        gap = Abs(leftCount - (total - leftCount))
-        If gap < bestGap Then
-            bestGap = gap
-            best = candidate
+    bestGap = -1
+    For candidate = 1 To highest - 1
+        leftHeight = MeasureColumn(pres, leftBody, True, candidate)
+        rightHeight = MeasureColumn(pres, rightBody, False, candidate)
+        ' A cut that empties a column is not a two-column layout.
+        If leftHeight > 0 And rightHeight > 0 Then
+            gap = Abs(leftHeight - rightHeight)
+            If bestGap < 0 Or gap < bestGap Then
+                bestGap = gap
+                best = candidate
+            End If
         End If
     Next candidate
 
     BalancedSplitAfter = best
+End Function
+
+' Fill one column for a trial cut and report how tall the text came out.
+'
+' The text written here is thrown away -- RebuildTocColumn writes the real
+' thing, with links and colours, straight after. This only needs the same
+' CHARACTERS so the measurement matches.
+Private Function MeasureColumn(ByVal pres As Presentation, ByVal body As Shape, _
+                               ByVal isLeftColumn As Boolean, _
+                               ByVal splitAfter As Long) As Single
+    Dim target As Slide
+    Dim targetIndex As Long
+    Dim targetSection As Long
+    Dim trialText As String
+
+    For targetIndex = 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        If ShouldIncludeInToc(target) Then
+            targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
+            If (isLeftColumn And targetSection <= splitAfter) Or _
+               (Not isLeftColumn And targetSection > splitAfter) Then
+                If Len(trialText) > 0 Then trialText = trialText & vbCrLf
+                trialText = trialText & NavigationEntryText(target)
+            End If
+        End If
+    Next targetIndex
+
+    If Len(trialText) = 0 Then
+        MeasureColumn = 0
+        Exit Function
+    End If
+
+    body.TextFrame.TextRange.text = trialText
+    MeasureColumn = body.TextFrame.TextRange.BoundHeight
+End Function
+
+' Give both columns the same vertical band before anything is measured.
+'
+' In v18 the left box is 826pt tall and the right 265pt, on every index slide.
+' Neither number was chosen: spAutoFit grew each box to its own content, so the
+' column with more entries ended up with more room, which is backwards. Both
+' get the same top and the same height -- the band from the top of the boxes to
+' the bottom of the slide -- and then the fit is a fair question.
+'
+' Widths are left alone. They differ too (363.6 vs 291.6), but that is a layout
+' decision someone made, not an artefact, and the measurement above accounts
+' for it.
+Private Sub NormaliseTocBoxes(ByVal pres As Presentation, _
+                              ByVal leftBody As Shape, ByVal rightBody As Shape)
+    Dim topEdge As Single
+    Dim band As Single
+
+    topEdge = leftBody.Top
+    If rightBody.Top < topEdge Then topEdge = rightBody.Top
+
+    band = pres.PageSetup.SlideHeight - topEdge - BottomMargin(pres)
+    If band <= 0 Then Err.Raise vbObjectError + 2116, , _
+        "No vertical room for the index columns."
+
+    leftBody.TextFrame2.AutoSize = msoAutoSizeNone
+    rightBody.TextFrame2.AutoSize = msoAutoSizeNone
+    leftBody.Top = topEdge
+    rightBody.Top = topEdge
+    leftBody.Height = band
+    rightBody.Height = band
+End Sub
+
+' How much to keep clear below the index. Derived from the slide, not chosen:
+' the same proportion the top margin already uses.
+Private Function BottomMargin(ByVal pres As Presentation) As Single
+    BottomMargin = pres.PageSetup.SlideHeight * 0.02
 End Function
 
 Private Sub ClearTextHyperlink(ByVal textRange As TextRange)
