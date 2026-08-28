@@ -17,6 +17,36 @@ Version: **0.1.2**
 - Applies configurable Latin/CJK fonts and minimum/maximum sizes only to managed navigation shapes.
 - Exposes one public macro, `RunSciTeXNavigation`; implementation helpers stay private.
 
+## セットアップ — AccessVBOM（スクリプトから取り込む場合のみ）
+
+手でモジュールを取り込んで実行するだけなら **不要** です。以下が要るのは
+`tools/apply-navigation.ps1` のようにスクリプトが VBA を書き込む場合だけ。
+
+**GUI で恒久的に有効化する**（運用者の手順、2026-08-28）:
+
+```
+ファイル → オプション → トラスト センター → トラスト センターの設定
+  → マクロの設定
+  → 「VBA プロジェクト オブジェクト モデルへのアクセスを信頼する」にチェック
+  → PowerPoint を再起動
+```
+
+再起動まで含めて一手順です。チェックしただけで再起動していないプロセスは、
+起動時に読んだ古い設定のまま動きます。
+
+**レジストリ**（同じ設定の実体）:
+
+```
+HKCU\Software\Microsoft\Office\16.0\PowerPoint\Security
+  AccessVBOM (DWORD) = 1
+```
+
+**何を許可しているのか。** これはマクロがマクロを書き換えられる状態です。
+恒久的に有効にするなら、出所の分からないマクロ入りファイルを開かない運用と
+セットで考えてください。一時的に開けて元に戻す形が要るなら
+`tools/apply-navigation.ps1` がそれをやります（元の値を記録し、`finally` から
+`tools/restore-access-vbom.ps1` を呼んで戻すので、途中で落ちても閉じます）。
+
 ## Try the tested sandbox
 
 Open [`dist/SciTeXNavigationSandbox_v0.1.2.pptm`](./dist/SciTeXNavigationSandbox_v0.1.2.pptm), enable macros, then run `RunSciTeXNavigation` from `Alt+F8`. The last slide is the hidden English configuration page.
