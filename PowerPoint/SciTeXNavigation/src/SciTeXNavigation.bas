@@ -38,15 +38,30 @@ Private mOverfullSlides As String
 Private mHideHiddenFromToc As Boolean
 Private mTwoColumnToc As Boolean
 
-' This is the only public macro. All implementation details stay out of Alt+F8.
+' The two public macros. Everything else stays out of Alt+F8.
+'
+' RunSciTeXNavigation is what a person runs: it works on whatever deck is in
+' front of them. RunSciTeXNavigationOn is what a SCRIPT runs, and it exists
+' because ActivePresentation is not a safe way to say "this deck".
+'
+' A presentation opened with WithWindow:=False has no window, so it is never
+' the ActivePresentation -- the property then returns the operator's OWN open
+' deck, or fails outright when nothing is open. Measured 2026-08-28: an
+' automated run opened the target windowless, and the macro broke into the VBE
+' on this line and sat there. A headless caller cannot see that dialog, so the
+' run simply never returned.
 Public Sub RunSciTeXNavigation()
+    RunSciTeXNavigationOn ActivePresentation
+End Sub
+
+Public Sub RunSciTeXNavigationOn(ByVal pres As Presentation)
     On Error GoTo Failed
 
-    Dim pres As Presentation
     Dim sld As Slide
     Dim sectionNumber As Long
 
-    Set pres = ActivePresentation
+    If pres Is Nothing Then Err.Raise vbObjectError + 2118, , _
+        "No presentation was given, and none is active."
     mOverfullSlides = ""
     mSplitCached = 0
     mSplitSlideIndex = 0
@@ -81,8 +96,37 @@ Public Sub RunSciTeXNavigation()
     Exit Sub
 
 Failed:
-    SetStatus ActivePresentation, "Navigation error " & CStr(Err.Number) & ": " & Err.Description
-    Err.Raise Err.Number, "RunSciTeXNavigation", Err.Description
+    ' Record BEFORE anything else: the status shape is on a slide the operator
+    ' may never open, and a script cannot read a dialog at all.
+    WriteFailureLog pres, Err.Number, Err.Description
+    On Error Resume Next
+    SetStatus pres, "Navigation error " & CStr(Err.Number) & ": " & Err.Description
+    On Error GoTo 0
+End Sub
+
+' Leave the reason somewhere a script can read it.
+'
+' Re-raising put VBA into break mode with a modal dialog. That is right for a
+' person -- they see the line -- and useless for automation: the window is
+' invisible to the caller, nothing returns, and it reads as a hang. The failure
+' is still loud, in two places that outlive the process: this file and the
+' deck's own status shape.
+Private Sub WriteFailureLog(ByVal pres As Presentation, _
+                            ByVal number As Long, ByVal description As String)
+    Dim handle As Integer
+    Dim target As String
+
+    On Error Resume Next
+    If pres Is Nothing Then Exit Sub
+    If Len(pres.Path) = 0 Then Exit Sub
+    target = pres.Path & PathSeparatorOf(pres) & "SciTeXNavigation.failure.txt"
+    handle = FreeFile
+    Open target For Output As #handle
+    Print #handle, "SciTeXNavigation v" & NAVIGATION_VERSION
+    Print #handle, "deck: " & pres.FullName
+    Print #handle, "error " & CStr(number) & ": " & description
+    Print #handle, "overfull slides: " & mOverfullSlides
+    Close #handle
 End Sub
 
 ' Take a copy before touching anything.
@@ -536,6 +580,22 @@ Private Sub MatchColumnSizes(ByVal leftBody As Shape, ByVal rightBody As Shape)
     ' at the new one. Skipping this is how a "fix" leaves the column ragged.
     SetPrefixTabStop leftBody
     SetPrefixTabStop rightBody
+
+    ' ...and re-fit AFTER, because the line above just changed the layout.
+    '
+    ' The tab stop sets the hanging indent, so a wider stop narrows the text
+    ' area and the same entries wrap onto more lines. That happens here, after
+    ' the planner has already certified that this size fits -- so the planner's
+    ' guarantee was measured against a layout that no longer exists.
+    '
+    ' Measured 2026-08-28 on AICHI v18: the planner settled on 20pt and the
+    ' rendered right column ran about 131pt past the bottom of the slide, with
+    ' its last five link overlays hanging off the page. Nothing was wrong with
+    ' the search; it was answering a question about a different layout.
+    '
+    ' Anything that moves text must be followed by something that re-checks it.
+    FitTocBody leftBody
+    FitTocBody rightBody
 End Sub
 
 Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide, ByVal body As Shape, ByVal isLeftColumn As Boolean, ByVal currentSection As Long)
