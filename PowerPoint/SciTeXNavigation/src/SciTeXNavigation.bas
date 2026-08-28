@@ -1504,10 +1504,32 @@ Private Function LetterCode(ByVal number As Long) As String
     LetterCode = result
 End Function
 
+' Report what the run did, wherever the deck keeps its status shape.
+'
+' This used to look on SLIDE 1 ONLY, under On Error Resume Next. A deck that
+' keeps SCITEX_STATUS anywhere else -- the configuration page is the natural
+' home, and that is where the shipped template puts it -- got no report at all,
+' silently.
+'
+' That mattered more than a missing line of text. RunSciTeXNavigationOn writes
+' the overfull-slide list here, so on any deck without the shape on slide 1 the
+' macro would notice that the index did not fit, record it, and then drop the
+' record on the floor. Measured 2026-08-28: AICHI v18 has no SCITEX_STATUS on
+' slide 1, so every overfull warning it ever produced went nowhere -- including
+' the run where the index genuinely overflowed at the 20pt floor.
+'
+' A finding nobody receives is not a report.
 Private Sub SetStatus(ByVal pres As Presentation, ByVal value As String)
-    On Error Resume Next
+    Dim sld As Slide
     Dim statusShape As Shape
-    Set statusShape = FindNamedShape(pres.Slides(1), STATUS_SHAPE)
-    If Not statusShape Is Nothing Then statusShape.TextFrame.TextRange.Text = value
+
+    On Error Resume Next
+    For Each sld In pres.Slides
+        Set statusShape = FindNamedShape(sld, STATUS_SHAPE)
+        If Not statusShape Is Nothing Then
+            statusShape.TextFrame.TextRange.text = value
+            Exit For
+        End If
+    Next sld
     On Error GoTo 0
 End Sub
