@@ -31,6 +31,9 @@ Private mBackupPath As String
 Private mSplitCached As Long
 Private mSplitSlideIndex As Long
 Private mPlannedSize As Single
+Private mPlannedLeftWidth As Single
+Private mPlannedRightWidth As Single
+Private mPlannedRoom As Single
 Private mOverfullSlides As String
 Private mHideHiddenFromToc As Boolean
 Private mTwoColumnToc As Boolean
@@ -769,11 +772,6 @@ Private Function ColumnSplit(ByVal pres As Presentation, ByVal tocSlide As Slide
     Dim leftBody As Shape
     Dim rightBody As Shape
 
-    If mSplitSlideIndex = tocSlide.SlideIndex And mSplitCached > 0 Then
-        ColumnSplit = mSplitCached
-        Exit Function
-    End If
-
     Set leftBody = FindNamedShape(tocSlide, TOC_BODY_LEFT)
     Set rightBody = FindNamedShape(tocSlide, TOC_BODY_RIGHT)
     ' No fallback cut here. A guessed number that renders without complaint is
@@ -783,21 +781,55 @@ Private Function ColumnSplit(ByVal pres As Presentation, ByVal tocSlide As Slide
             "Index slide " & tocSlide.SlideIndex & " is missing a column body shape."
     End If
 
+    ' Every index page lists the SAME entries, so the answer is a property of
+    ' the deck and the box geometry -- not of which page we happen to be on.
+    ' Keying the cache on SlideIndex re-ran the whole search once per index
+    ' page: nine full searches for one answer, and the run took long enough
+    ' that it read as a hang.
+    If mSplitCached > 0 _
+       And leftBody.Width = mPlannedLeftWidth _
+       And rightBody.Width = mPlannedRightWidth _
+       And UsableHeight(leftBody) = mPlannedRoom Then
+        ColumnSplit = mSplitCached
+        Exit Function
+    End If
+
     mSplitCached = PlanColumns(pres, tocSlide, leftBody, rightBody)
     mSplitSlideIndex = tocSlide.SlideIndex
+    mPlannedLeftWidth = leftBody.Width
+    mPlannedRightWidth = rightBody.Width
+    mPlannedRoom = UsableHeight(leftBody)
     ColumnSplit = mSplitCached
 End Function
 
 ' Settle the size and the cut together, since neither is decidable alone.
-' Records the size in mPlannedSize for the columns to use; returns the cut.
+' Records the size in mPlannedSize; returns the cut.
+'
+' BOTH SEARCHES BISECT, and the reason is the same for each: the quantity is
+' monotone. A column only grows as the cut moves down (more entries) and as the
+' type grows. So "does the left column fit?" flips exactly once as the cut
+' moves, and "is there any workable cut?" flips exactly once as the size moves.
+' A value that flips once is found by halving the range, not by walking it.
+'
+' Walking it is what shipped first, and it was unusable: nine index pages, each
+' re-running a search of ~21 sizes x 8 cuts, every step of which fills and
+' measures a real column over COM. That is on the order of 1500 full layouts
+' for one answer, and it presents to the operator as PowerPoint hung. Bisection
+' plus caching the answer for the whole deck brings it to about 20.
 Private Function PlanColumns(ByVal pres As Presentation, ByVal tocSlide As Slide, _
                              ByVal leftBody As Shape, ByVal rightBody As Shape) As Long
     Dim highest As Long
-    Dim trySize As Single
-    Dim cut As Long
-    Dim fittingCut As Long
     Dim leftRoom As Single
     Dim rightRoom As Single
+    Dim steps As Long
+    Dim lo As Long
+    Dim hi As Long
+    Dim mid As Long
+    Dim trySize As Single
+    Dim cut As Long
+    Dim bestCut As Long
+    Dim bestSize As Single
+    Dim fits As Boolean
 
     highest = HighestSection(pres)
     If highest <= 1 Then
@@ -809,42 +841,78 @@ Private Function PlanColumns(ByVal pres As Presentation, ByVal tocSlide As Slide
     leftRoom = UsableHeight(leftBody)
     rightRoom = UsableHeight(rightBody)
 
-    trySize = mFontMax
-    Do While trySize >= mFontMin
-        fittingCut = LargestFittingCut(pres, tocSlide, leftBody, highest, trySize, leftRoom)
-        If fittingCut > 0 Then
-            If ColumnHeightAt(pres, tocSlide, rightBody, False, fittingCut, trySize) <= rightRoom Then
-                mPlannedSize = trySize
-                PlanColumns = fittingCut
-                Exit Function
+    steps = CLng((mFontMax - mFontMin) / 0.5)
+    If steps < 0 Then steps = 0
+    lo = 0
+    hi = steps
+    bestCut = 0
+    bestSize = mFontMin
+
+    Do While lo <= hi
+        mid = (lo + hi) \ 2
+        trySize = mFontMin + mid * 0.5
+        cut = LargestFittingCut(pres, tocSlide, leftBody, highest, trySize, leftRoom)
+        fits = False
+        If cut > 0 Then
+            ' The right column only shrinks as the cut moves down, so the cut
+            ' that maximises the left is also the kindest one to the right.
+            ' If it does not fit here, no cut at this size will.
+            If ColumnHeightAt(pres, tocSlide, rightBody, False, cut, trySize) <= rightRoom Then
+                fits = True
             End If
         End If
-        trySize = trySize - 0.5
+        If fits Then
+            bestSize = trySize
+            bestCut = cut
+            lo = mid + 1
+        Else
+            hi = mid - 1
+        End If
     Loop
+
+    If bestCut > 0 Then
+        mPlannedSize = bestSize
+        PlanColumns = bestCut
+        Exit Function
+    End If
 
     ' Nothing fits even at the smallest size the config allows. Name the slide
     ' on the status line rather than cropping quietly, and give the left column
     ' as much as it can hold so the overflow is at one end instead of both.
     mPlannedSize = mFontMin
     NoteOverfull tocSlide
-    fittingCut = LargestFittingCut(pres, tocSlide, leftBody, highest, mFontMin, leftRoom)
-    If fittingCut <= 0 Then fittingCut = 1
-    PlanColumns = fittingCut
+    bestCut = LargestFittingCut(pres, tocSlide, leftBody, highest, mFontMin, leftRoom)
+    If bestCut <= 0 Then bestCut = 1
+    PlanColumns = bestCut
 End Function
 
-' The lowest cut whose left column still fits, or 0 if none does.
+' The largest cut whose left column still fits, or 0 if none does.
+'
+' Bisection: the left column only grows as the cut moves down, so "it fits"
+' is true for every cut up to some boundary and false after it. Halving finds
+' that boundary in about three measurements where walking took eight, and each
+' measurement is a real fill-and-measure over COM.
 Private Function LargestFittingCut(ByVal pres As Presentation, ByVal tocSlide As Slide, _
                                    ByVal leftBody As Shape, ByVal highest As Long, _
                                    ByVal fontSize As Single, ByVal room As Single) As Long
-    Dim cut As Long
+    Dim lo As Long
+    Dim hi As Long
+    Dim mid As Long
+    Dim best As Long
 
-    For cut = highest - 1 To 1 Step -1
-        If ColumnHeightAt(pres, tocSlide, leftBody, True, cut, fontSize) <= room Then
-            LargestFittingCut = cut
-            Exit Function
+    lo = 1
+    hi = highest - 1
+    best = 0
+    Do While lo <= hi
+        mid = (lo + hi) \ 2
+        If ColumnHeightAt(pres, tocSlide, leftBody, True, mid, fontSize) <= room Then
+            best = mid
+            lo = mid + 1
+        Else
+            hi = mid - 1
         End If
-    Next cut
-    LargestFittingCut = 0
+    Loop
+    LargestFittingCut = best
 End Function
 
 Private Function HighestSection(ByVal pres As Presentation) As Long
