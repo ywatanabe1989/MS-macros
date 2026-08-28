@@ -79,7 +79,7 @@ try {
     # 1 --- cover. Tagged so the macro leaves it out of the index.
     $cover = $pres.Slides.Add(1, 12)
     $cover.Tags.Add("SCITEX_COVER", "1") | Out-Null
-    [void](Add-Box $cover "COVER_TITLE" "SciTeX Navigation" 60 190 600 60 40 $INK $true)
+    [void](Add-Box $cover "COVER_TITLE" "SciTeX ToC" 60 190 600 60 40 $INK $true)
     [void](Add-Box $cover "COVER_SUB" "A table of contents that keeps itself correct." 60 256 600 36 20 $MUTED $false)
 
     # 2 --- what it is

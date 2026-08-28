@@ -270,7 +270,7 @@ Private Sub BackupBeforeRun(ByVal pres As Presentation)
 
     stamp = Format$(Now, "yyyymmdd-hhnnss")
     backupPath = pres.Path & PathSeparatorOf(pres) & _
-        baseName & ".before-navigation-" & stamp & ".pptm"
+        baseName & ".before-toc-" & stamp & ".pptm"
 
     pres.SaveCopyAs backupPath, ppSaveAsOpenXMLPresentationMacroEnabled
     mBackupPath = backupPath
