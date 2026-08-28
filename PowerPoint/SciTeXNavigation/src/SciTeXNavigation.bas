@@ -1,14 +1,14 @@
 Attribute VB_Name = "SciTeXNavigation"
 Option Explicit
 
-Private Const NAVIGATION_VERSION As String = "0.1.2"
+Private Const NAVIGATION_VERSION As String = "0.4.0"
 Private Const TAG_CONFIG As String = "SCITEX_CONFIG"
 Private Const TAG_COVER As String = "SCITEX_COVER"
 Private Const TAG_TOC As String = "SCITEX_TOC"
 Private Const TAG_SECTION_TITLE As String = "SCITEX_SECTION_TITLE"
 Private Const TAG_NAV_CODE As String = "SCITEX_NAV_CODE"
 Private Const TAG_CURRENT_SECTION As String = "SCITEX_CURRENT_SECTION"
-Private Const TAG_TOC_SPLIT_AFTER As String = "SCITEX_TOC_SPLIT_AFTER"
+Private Const TAG_TOC_SPLIT_AFTER As String = "SCITEX_TOC_SPLIT_AFTER"  ' read only to delete it
 Private Const TITLE_SHAPE As String = "SCITEX_TITLE"
 Private Const TOC_BODY_SHAPE As String = "SCITEX_TOC_BODY"
 Private Const TOC_BODY_LEFT As String = "SCITEX_TOC_BODY_LEFT"
@@ -27,18 +27,45 @@ Private mFontLatin As String
 Private mFontCjk As String
 Private mFontMin As Single
 Private mFontMax As Single
+Private mBackupPath As String
+Private mSplitCached As Long
+Private mSplitSlideIndex As Long
+Private mPlannedSize As Single
+Private mPlannedLeftWidth As Single
+Private mPlannedRightWidth As Single
+Private mPlannedRoom As Single
+Private mOverfullSlides As String
 Private mHideHiddenFromToc As Boolean
 Private mTwoColumnToc As Boolean
 
-' This is the only public macro. All implementation details stay out of Alt+F8.
+' The two public macros. Everything else stays out of Alt+F8.
+'
+' RunSciTeXNavigation is what a person runs: it works on whatever deck is in
+' front of them. RunSciTeXNavigationOn is what a SCRIPT runs, and it exists
+' because ActivePresentation is not a safe way to say "this deck".
+'
+' A presentation opened with WithWindow:=False has no window, so it is never
+' the ActivePresentation -- the property then returns the operator's OWN open
+' deck, or fails outright when nothing is open. Measured 2026-08-28: an
+' automated run opened the target windowless, and the macro broke into the VBE
+' on this line and sat there. A headless caller cannot see that dialog, so the
+' run simply never returned.
 Public Sub RunSciTeXNavigation()
+    RunSciTeXNavigationOn ActivePresentation
+End Sub
+
+Public Sub RunSciTeXNavigationOn(ByVal pres As Presentation)
     On Error GoTo Failed
 
-    Dim pres As Presentation
     Dim sld As Slide
     Dim sectionNumber As Long
 
-    Set pres = ActivePresentation
+    If pres Is Nothing Then Err.Raise vbObjectError + 2118, , _
+        "No presentation was given, and none is active."
+    mOverfullSlides = ""
+    mSplitCached = 0
+    mSplitSlideIndex = 0
+    BackupBeforeRun pres
     LoadConfiguration pres
     SetDisplayedVersion pres
     mTwoColumnToc = HasTwoColumnToc(pres)
@@ -53,12 +80,87 @@ Public Sub RunSciTeXNavigation()
         If IsTocSlide(sld) Then RebuildFullToc pres, sld
     Next sld
 
-    SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & CStr(sectionNumber) & " sections"
+    If Len(mOverfullSlides) > 0 Then
+        ' Shrinking stopped at the configured minimum and the text still does
+        ' not fit. Going smaller is not the answer -- at that point the slide
+        ' is carrying more than a slide should. Say which ones, rather than
+        ' leaving an overflow that looks like the bug this version fixed.
+        SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & _
+            CStr(sectionNumber) & " sections. Too much content at " & _
+            CStr(mFontMin) & "pt on slide(s): " & mOverfullSlides & _
+            ". Backup: " & BackupName()
+    Else
+        SetStatus pres, "Navigation v" & NAVIGATION_VERSION & " updated - " & _
+            CStr(sectionNumber) & " sections. Backup: " & BackupName()
+    End If
     Exit Sub
 
 Failed:
-    SetStatus ActivePresentation, "Navigation error " & CStr(Err.Number) & ": " & Err.Description
-    Err.Raise Err.Number, "RunSciTeXNavigation", Err.Description
+    ' Record BEFORE anything else: the status shape is on a slide the operator
+    ' may never open, and a script cannot read a dialog at all.
+    WriteFailureLog pres, Err.Number, Err.Description
+    On Error Resume Next
+    SetStatus pres, "Navigation error " & CStr(Err.Number) & ": " & Err.Description
+    On Error GoTo 0
+End Sub
+
+' Leave the reason somewhere a script can read it.
+'
+' Re-raising put VBA into break mode with a modal dialog. That is right for a
+' person -- they see the line -- and useless for automation: the window is
+' invisible to the caller, nothing returns, and it reads as a hang. The failure
+' is still loud, in two places that outlive the process: this file and the
+' deck's own status shape.
+Private Sub WriteFailureLog(ByVal pres As Presentation, _
+                            ByVal number As Long, ByVal description As String)
+    Dim handle As Integer
+    Dim target As String
+
+    On Error Resume Next
+    If pres Is Nothing Then Exit Sub
+    If Len(pres.Path) = 0 Then Exit Sub
+    target = pres.Path & PathSeparatorOf(pres) & "SciTeXNavigation.failure.txt"
+    handle = FreeFile
+    Open target For Output As #handle
+    Print #handle, "SciTeXNavigation v" & NAVIGATION_VERSION
+    Print #handle, "deck: " & pres.FullName
+    Print #handle, "error " & CStr(number) & ": " & description
+    Print #handle, "overfull slides: " & mOverfullSlides
+    Close #handle
+End Sub
+
+' Take a copy before touching anything.
+'
+' PowerPoint's undo stack does not survive a macro: once this has renumbered
+' slides and rewritten two index columns, Ctrl+Z will not put the deck back.
+' The only real undo is a file that still has the old content, so make one
+' first and tell the operator where it is. Requested 2026-08-27 after the
+' operator asked "if it goes wrong can I get back".
+'
+' Refuses to run on a presentation that has never been saved, because there is
+' nowhere to put the copy and nothing to go back to.
+Private Sub BackupBeforeRun(ByVal pres As Presentation)
+    Dim stamp As String
+    Dim backupPath As String
+    Dim baseName As String
+    Dim dotPosition As Long
+
+    If Len(pres.Path) = 0 Then
+        Err.Raise vbObjectError + 2120, , _
+            "Save the presentation first. This macro cannot be undone with Ctrl+Z, " & _
+            "so it will not run on a file that has never been saved."
+    End If
+
+    baseName = pres.Name
+    dotPosition = InStrRev(baseName, ".")
+    If dotPosition > 1 Then baseName = Left$(baseName, dotPosition - 1)
+
+    stamp = Format$(Now, "yyyymmdd-hhnnss")
+    backupPath = pres.Path & PathSeparatorOf(pres) & _
+        baseName & ".before-navigation-" & stamp & ".pptm"
+
+    pres.SaveCopyAs backupPath, ppSaveAsOpenXMLPresentationMacroEnabled
+    mBackupPath = backupPath
 End Sub
 
 Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
@@ -73,6 +175,7 @@ Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
     Dim linkLength As Long
     Dim currentSection As Long
     Dim targetSection As Long
+    Dim position As Long
     Dim leftBody As Shape
     Dim rightBody As Shape
 
@@ -83,8 +186,21 @@ Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
         Set rightBody = FindNamedShape(tocSlide, TOC_BODY_RIGHT)
         If leftBody Is Nothing Or rightBody Is Nothing Then Err.Raise vbObjectError + 2100, , "Two-column TOC requires left and right body shapes."
         currentSection = CLng(Val(SlideTag(tocSlide, TAG_NAV_CODE)))
+        ' Same band for both columns before anything is measured, or the
+        ' measurement answers a question about box sizes instead of text.
+        NormaliseTocBoxes pres, leftBody, rightBody
         RebuildTocColumn pres, tocSlide, leftBody, True, currentSection
         RebuildTocColumn pres, tocSlide, rightBody, False, currentSection
+        FitTocBody leftBody
+        FitTocBody rightBody
+        ' Both columns are laid out at the planned size, so this is a backstop
+        ' rather than a correction: if FitTocBody had to shrink one of them,
+        ' two sizes of the same list reads as a mistake even when both fit.
+        MatchColumnSizes leftBody, rightBody
+
+        ' Last, once nothing will move the text again. See PlaceTocLinkOverlays.
+        PlaceTocLinkOverlays pres, tocSlide, leftBody, True, ColumnSplit(pres, tocSlide)
+        PlaceTocLinkOverlays pres, tocSlide, rightBody, False, ColumnSplit(pres, tocSlide)
         Exit Sub
     End If
 
@@ -298,104 +414,255 @@ Private Sub SetTocVisibleTitle(ByVal tocSlide As Slide, ByVal sectionTitle As St
 
 End Sub
 
+' Titles: one size for the whole deck, and the room measured rather than assumed.
+'
+' Two numbers used to be written in here. Both are on the slide and can be
+' counted, so neither should have been a number:
+'
+'   LOGO_CLEARANCE = 72   how much room the master's logo takes on the right.
+'                         Measured now: the leftmost shape that actually sits
+'                         beside the title. A deck with no logo got 72pt taken
+'                         away from it for nothing; a deck with a wider one
+'                         had its titles run underneath.
+'
+'   the size itself       v18 carried 24pt on ten slides and 28pt on forty --
+'                         the operator's "24pt vs 28pt". Titles disagree
+'                         because each was fitted alone. One size that fits
+'                         every title cannot disagree with itself.
+'
+' The floor (SCITEX_CFG_FONT_MIN) stays a setting. It is not derivable: it says
+' how small type may get before it stops being readable, and that is a
+' judgement about the reader, not a fact about the slide.
 Private Sub FitTocTitles(ByVal pres As Presentation)
-    Const LOGO_CLEARANCE As Single = 72
     Dim sld As Slide
     Dim titleShape As Shape
     Dim titleRange As TextRange
     Dim availableWidth As Single
     Dim targetSize As Single
 
+    targetSize = UniformTitleSize(pres)
+
     For Each sld In pres.Slides
-        If IsTocSlide(sld) Then
+        If Not IsConfigSlide(sld) Then
             Set titleShape = FindNamedShape(sld, TITLE_SHAPE)
             If Not titleShape Is Nothing Then
-                availableWidth = pres.PageSetup.SlideWidth - titleShape.Left - LOGO_CLEARANCE
-                If availableWidth <= 0 Then Err.Raise vbObjectError + 2114, , "TOC title has no usable width on slide " & CStr(sld.SlideIndex) & "."
+                If titleShape.TextFrame.HasText <> msoTrue Then GoTo ContinueSlide
+                availableWidth = TitleRoom(pres, sld, titleShape)
+                If availableWidth <= 0 Then Err.Raise vbObjectError + 2114, , _
+                    "Title has no usable width on slide " & CStr(sld.SlideIndex) & "."
 
                 ' Keep the title inside the header instead of allowing PowerPoint
-                ' to grow the text box over the master logo.
+                ' to grow the text box over whatever sits beside it.
                 titleShape.TextFrame2.AutoSize = msoAutoSizeNone
                 titleShape.TextFrame.WordWrap = msoFalse
                 titleShape.Width = availableWidth
                 Set titleRange = titleShape.TextFrame.TextRange
-                targetSize = titleRange.Characters(1, 1).Font.Size
-                If targetSize > mFontMax Then targetSize = mFontMax
-                If targetSize < mFontMin Then targetSize = mFontMin
                 titleRange.Font.Size = targetSize
 
-                Do While titleRange.BoundWidth > availableWidth And targetSize > mFontMin
-                    targetSize = targetSize - 0.5
-                    If targetSize < mFontMin Then targetSize = mFontMin
-                    titleRange.Font.Size = targetSize
+                ' The common size is chosen to fit every title, so this loop
+                ' should not run. It stays because a font substitution on
+                ' another machine can change the measurement after the fact,
+                ' and a title that overflows silently is the bug we started from.
+                Do While titleRange.BoundWidth > availableWidth And titleRange.Font.Size > mFontMin
+                    titleRange.Font.Size = titleRange.Font.Size - 0.5
                 Loop
+                If titleRange.BoundWidth > availableWidth Then NoteOverfull sld
             End If
         End If
+ContinueSlide:
     Next sld
 End Sub
 
+' The largest size at which EVERY title fits its own slide.
+'
+' Counted, not chosen: try the ceiling, measure all titles, step down until the
+' widest one fits. Whatever comes out is the size every title gets, so they
+' cannot disagree.
+Private Function UniformTitleSize(ByVal pres As Presentation) As Single
+    Dim candidate As Single
+    Dim sld As Slide
+    Dim titleShape As Shape
+    Dim titleRange As TextRange
+    Dim room As Single
+    Dim fitsAll As Boolean
+
+    candidate = mFontMax
+    Do
+        fitsAll = True
+        For Each sld In pres.Slides
+            If Not IsConfigSlide(sld) Then
+                Set titleShape = FindNamedShape(sld, TITLE_SHAPE)
+                If Not titleShape Is Nothing Then
+                    If titleShape.TextFrame.HasText = msoTrue Then
+                        room = TitleRoom(pres, sld, titleShape)
+                        If room > 0 Then
+                            titleShape.TextFrame2.AutoSize = msoAutoSizeNone
+                            titleShape.TextFrame.WordWrap = msoFalse
+                            Set titleRange = titleShape.TextFrame.TextRange
+                            titleRange.Font.Size = candidate
+                            If titleRange.BoundWidth > room Then fitsAll = False
+                        End If
+                    End If
+                End If
+            End If
+        Next sld
+        If fitsAll Then Exit Do
+        candidate = candidate - 0.5
+    Loop While candidate > mFontMin
+
+    If candidate < mFontMin Then candidate = mFontMin
+    UniformTitleSize = candidate
+End Function
+
+' How much horizontal room this title actually has.
+'
+' The old code subtracted a written-in 72pt for "the logo". What is really
+' there is whatever shape sits beside the title, and it is on the slide: take
+' the leftmost shape that starts to the right of the title and overlaps it
+' vertically. No such shape means the room runs to the slide edge.
+Private Function TitleRoom(ByVal pres As Presentation, ByVal sld As Slide, _
+                           ByVal titleShape As Shape) As Single
+    Dim shp As Shape
+    Dim limit As Single
+    Dim titleTop As Single
+    Dim titleBottom As Single
+    Dim overlap As Single
+
+    limit = pres.PageSetup.SlideWidth
+    titleTop = titleShape.Top
+    titleBottom = titleShape.Top + titleShape.Height
+
+    For Each shp In sld.Shapes
+        If shp.Name <> titleShape.Name Then
+            If shp.Left > titleShape.Left Then
+                ' BESIDE, not merely touching. A shape has to share MOST of the
+                ' title's height to be in its way; clipping the last few points
+                ' of it means the shape sits BELOW and the title may run over
+                ' the top of it.
+                '
+                ' Any overlap at all was the first rule, and it collapsed four
+                ' titles. Measured 2026-08-28 on AICHI v18 slides 40-43 -- the
+                ' product and pricing pages: the title spans y 7.4 to 48.0 and
+                ' the caption under it starts at 43.1, so they share 4.9pt of
+                ' a 40.6pt title. That caption was read as a neighbour, room
+                ' came out as 14.8 - 7.1 = 7.7pt, and titleShape.Width was set
+                ' to it -- 687.2pt boxes became 4.8pt, wrapping one short title
+                ' onto a dozen lines.
+                '
+                ' Half is not a tuned threshold; it is what "beside" means.
+                overlap = TitleOverlap(titleTop, titleBottom, shp)
+                If overlap * 2 > titleShape.Height Then
+                    If shp.Left < limit Then limit = shp.Left
+                End If
+            End If
+        End If
+    Next shp
+
+    TitleRoom = limit - titleShape.Left - SpaceWidth(titleShape.TextFrame.TextRange)
+End Function
+
+' The prefix and the title are separated by a TAB, not by spaces.
+'
+' The configured face is proportional, so "1a." and "3i." are not the same
+' width and no amount of padding lines the titles up -- the operator sees a
+' ragged left edge down the whole index. A tab stop is absolute: every title
+' starts at the same x regardless of what the prefix measures, and that x is
+' the widest prefix in the column -- measured, not written in.
+' How much of the title's vertical band a shape actually covers.
+Private Function TitleOverlap(ByVal titleTop As Single, ByVal titleBottom As Single, _
+                              ByVal shp As Shape) As Single
+    Dim topMost As Single
+    Dim bottomMost As Single
+
+    topMost = shp.Top
+    If titleTop > topMost Then topMost = titleTop
+    bottomMost = shp.Top + shp.Height
+    If titleBottom < bottomMost Then bottomMost = titleBottom
+
+    TitleOverlap = bottomMost - topMost
+    If TitleOverlap < 0 Then TitleOverlap = 0
+End Function
+
 Private Function NavigationEntryText(ByVal sld As Slide) As String
     If IsTocSlide(sld) Then
-        NavigationEntryText = SlideTag(sld, TAG_NAV_CODE) & ". " & SlideTag(sld, TAG_SECTION_TITLE)
+        NavigationEntryText = SlideTag(sld, TAG_NAV_CODE) & "." & vbTab & SlideTag(sld, TAG_SECTION_TITLE)
     Else
         NavigationEntryText = GetSlideTitle(sld)
     End If
 End Function
 
+' Put both index columns on one size -- the smaller, so neither overflows.
+'
+' Fitting each column separately is correct per column and wrong per slide: a
+' 23-entry column shrinks and a 9-entry one does not, and the reader sees two
+' type sizes in one list. Counting settles it; there is nothing to choose.
+Private Sub MatchColumnSizes(ByVal leftBody As Shape, ByVal rightBody As Shape)
+    Dim leftSize As Single
+    Dim rightSize As Single
+    Dim smaller As Single
+
+    If leftBody.TextFrame.HasText <> msoTrue Then Exit Sub
+    If rightBody.TextFrame.HasText <> msoTrue Then Exit Sub
+
+    leftSize = leftBody.TextFrame.TextRange.Characters(1, 1).Font.Size
+    rightSize = rightBody.TextFrame.TextRange.Characters(1, 1).Font.Size
+    If leftSize <= 0 Or rightSize <= 0 Then Exit Sub
+
+    smaller = leftSize
+    If rightSize < smaller Then smaller = rightSize
+
+    leftBody.TextFrame.TextRange.Font.Size = smaller
+    rightBody.TextFrame.TextRange.Font.Size = smaller
+
+    ' The tab stop was measured at the old size, so it has to be re-measured
+    ' at the new one. Skipping this is how a "fix" leaves the column ragged.
+    SetPrefixTabStop leftBody
+    SetPrefixTabStop rightBody
+
+    ' ...and re-fit AFTER, because the line above just changed the layout.
+    '
+    ' The tab stop sets the hanging indent, so a wider stop narrows the text
+    ' area and the same entries wrap onto more lines. That happens here, after
+    ' the planner has already certified that this size fits -- so the planner's
+    ' guarantee was measured against a layout that no longer exists.
+    '
+    ' Measured 2026-08-28 on AICHI v18: the planner settled on 20pt and the
+    ' rendered right column ran about 131pt past the bottom of the slide, with
+    ' its last five link overlays hanging off the page. Nothing was wrong with
+    ' the search; it was answering a question about a different layout.
+    '
+    ' Anything that moves text must be followed by something that re-checks it.
+    FitTocBody leftBody
+    FitTocBody rightBody
+End Sub
+
 Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide, ByVal body As Shape, ByVal isLeftColumn As Boolean, ByVal currentSection As Long)
     Dim target As Slide
     Dim targetIndex As Long
     Dim lineNumber As Long
-    Dim tocText As String
-    Dim navigationCode As String
     Dim targetSection As Long
+    Dim position As Long
     Dim splitAfter As Long
     Dim paragraphRange As TextRange
     Dim linkRange As TextRange
-    Dim linkLength As Long
 
-    splitAfter = CLng(Val(SlideTag(tocSlide, TAG_TOC_SPLIT_AFTER)))
-    If splitAfter <= 0 Then splitAfter = 3
-    tocText = ""
+    ' The cut is measured, never stored. A written-in split is the defect this
+    ' version removes, so a leftover tag is cleared rather than obeyed.
+    DeleteSlideTag tocSlide, TAG_TOC_SPLIT_AFTER
+    splitAfter = ColumnSplit(pres, tocSlide)
 
-    For targetIndex = 1 To pres.Slides.Count
-        Set target = pres.Slides(targetIndex)
-        navigationCode = SlideTag(target, TAG_NAV_CODE)
-        If ShouldIncludeInToc(target) Then
-            targetSection = CLng(Val(navigationCode))
-            If (isLeftColumn And targetSection <= splitAfter) Or (Not isLeftColumn And targetSection > splitAfter) Then
-                If Len(tocText) > 0 Then tocText = tocText & vbCrLf
-                tocText = tocText & NavigationEntryText(target)
-            End If
-        End If
-    Next targetIndex
-
-    body.TextFrame.TextRange.Text = tocText
-    body.TextFrame.TextRange.Font.Bold = msoFalse
-    body.TextFrame.TextRange.Font.Underline = msoFalse
-    With body.TextFrame.Ruler.Levels(1)
-        .FirstMargin = 0
-        .LeftMargin = 0
-    End With
-    With body.TextFrame.Ruler.Levels(2)
-        .FirstMargin = 18
-        .LeftMargin = 18
-    End With
+    If LayOutColumn(pres, body, isLeftColumn, splitAfter, mPlannedSize) = 0 Then Exit Sub
 
     lineNumber = 0
     For targetIndex = 1 To pres.Slides.Count
         Set target = pres.Slides(targetIndex)
-        navigationCode = SlideTag(target, TAG_NAV_CODE)
         If ShouldIncludeInToc(target) Then
-            targetSection = CLng(Val(navigationCode))
-            If (isLeftColumn And targetSection <= splitAfter) Or (Not isLeftColumn And targetSection > splitAfter) Then
+            position = position + 1
+            targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
+            If BelongsInColumn(position, isLeftColumn, splitAfter) Then
                 lineNumber = lineNumber + 1
                 Set paragraphRange = body.TextFrame.TextRange.Paragraphs(lineNumber, 1)
-                linkLength = Len(paragraphRange.Text)
-                Do While linkLength > 0 And (Mid$(paragraphRange.Text, linkLength, 1) = vbCr Or Mid$(paragraphRange.Text, linkLength, 1) = vbLf)
-                    linkLength = linkLength - 1
-                Loop
-                Set linkRange = paragraphRange.Characters(1, linkLength)
+                Set linkRange = EntryRange(paragraphRange)
                 ClearTextHyperlink linkRange
                 If targetSection = currentSection Then
                     linkRange.Font.Color.RGB = RGB(27, 38, 53)
@@ -404,24 +671,557 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
                     linkRange.Font.Color.RGB = RGB(170, 179, 188)
                     paragraphRange.Font.Color.RGB = RGB(170, 179, 188)
                 End If
-                If IsTocSlide(target) Then
-                    paragraphRange.IndentLevel = 1
-                    paragraphRange.Font.Bold = msoFalse
-                    paragraphRange.Font.Underline = msoFalse
-                    linkRange.Font.Bold = msoTrue
-                    linkRange.Font.Underline = msoTrue
-                Else
-                    paragraphRange.IndentLevel = 2
-                    linkRange.Font.Bold = msoFalse
-                    paragraphRange.Font.Bold = msoFalse
-                    linkRange.Font.Underline = msoFalse
-                    paragraphRange.Font.Underline = msoFalse
-                End If
-                AddTocLinkOverlay tocSlide, paragraphRange, target, IIf(isLeftColumn, "L", "R"), lineNumber
             End If
         End If
     Next targetIndex
 End Sub
+
+' Put the clickable rectangles on, AFTER the type has stopped moving.
+'
+' These are separate SHAPES positioned from where each paragraph currently sits.
+' Nothing repositions them later, so placing them during the build pins them to
+' an intermediate layout: every later step -- MatchColumnSizes settling both
+' columns on one size, SetPrefixTabStop changing the hanging indent and so the
+' wrapping, FitTocBody shrinking to fit -- moves the text out from under them.
+'
+' Measured 2026-08-28 on AICHI v18: the text ended correctly at 529.2pt on a
+' 540pt slide while the last overlays sat at 621, 647 and 671 -- up to 131pt
+' off the page. The first repair re-fitted the TEXT and still left the overlays
+' where they were, because it treated a stale-placement bug as a sizing bug.
+' The two look identical in the report and are not the same defect.
+Private Sub PlaceTocLinkOverlays(ByVal pres As Presentation, ByVal tocSlide As Slide, _
+                                 ByVal body As Shape, ByVal isLeftColumn As Boolean, _
+                                 ByVal splitAfter As Long)
+    Dim target As Slide
+    Dim targetIndex As Long
+    Dim lineNumber As Long
+    Dim targetSection As Long
+    Dim position As Long
+
+    If body.TextFrame.HasText <> msoTrue Then Exit Sub
+
+    lineNumber = 0
+    For targetIndex = 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        If ShouldIncludeInToc(target) Then
+            position = position + 1
+            targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
+            If BelongsInColumn(position, isLeftColumn, splitAfter) Then
+                lineNumber = lineNumber + 1
+                AddTocLinkOverlay tocSlide, _
+                    body.TextFrame.TextRange.Paragraphs(lineNumber, 1), _
+                    target, IIf(isLeftColumn, "L", "R"), lineNumber
+            End If
+        End If
+    Next targetIndex
+End Sub
+
+' One tab stop, placed where the widest prefix actually ends.
+'
+' There is nothing to choose here. Every prefix is on the slide and can be
+' measured, so the stop that clears all of them is the widest one plus a gap.
+' A written-in number (34pt was the old one) is a guess that goes stale the
+' first time a prefix reaches "3i." from "3a.", or the font changes, and
+' nothing tells you it has.
+'
+' Ruler.TabStops accumulates: rebuilding the index without clearing leaves the
+' previous run's stops behind, and the second stop is the one the tab lands on.
+Private Sub SetPrefixTabStop(ByVal body As Shape)
+    Dim bodyRuler As Ruler
+    Dim index As Long
+    Dim stopAt As Single
+
+    stopAt = MeasuredPrefixTab(body)
+    Set bodyRuler = body.TextFrame.Ruler
+    For index = bodyRuler.TabStops.Count To 1 Step -1
+        bodyRuler.TabStops(index).Clear
+    Next index
+    bodyRuler.TabStops.Add ppTabStopLeft, stopAt
+    With body.TextFrame.Ruler.Levels(1)
+        .FirstMargin = 0
+        .LeftMargin = stopAt
+    End With
+    With body.TextFrame.Ruler.Levels(2)
+        .FirstMargin = stopAt
+        .LeftMargin = stopAt
+    End With
+End Sub
+
+' The widest prefix in this column, measured, plus one space.
+'
+' Called AFTER the text is written, because that is the only moment the widths
+' exist. The gap is a measured space in the same run rather than a chosen
+' number, so it scales with the font instead of drifting from it.
+Private Function MeasuredPrefixTab(ByVal body As Shape) As Single
+    Dim para As TextRange
+    Dim index As Long
+    Dim tabPosition As Long
+    Dim widest As Single
+    Dim w As Single
+
+    If body.TextFrame.HasText <> msoTrue Then
+        MeasuredPrefixTab = 0
+        Exit Function
+    End If
+
+    For index = 1 To body.TextFrame.TextRange.Paragraphs.Count
+        Set para = body.TextFrame.TextRange.Paragraphs(index, 1)
+        tabPosition = InStr(1, para.text, vbTab, vbBinaryCompare)
+        If tabPosition > 1 Then
+            w = para.Characters(1, tabPosition - 1).BoundWidth
+            If w > widest Then widest = w
+        End If
+    Next index
+
+    If widest <= 0 Then
+        MeasuredPrefixTab = 0
+    Else
+        MeasuredPrefixTab = widest + SpaceWidth(body.TextFrame.TextRange)
+    End If
+End Function
+
+' One space, in the text's own font. Used as the gap after a prefix and after
+' a title, so spacing follows the type rather than a constant.
+Private Function SpaceWidth(ByVal sample As TextRange) As Single
+    Dim probe As Single
+    On Error Resume Next
+    probe = sample.Characters(1, 1).BoundWidth * 0.45
+    On Error GoTo 0
+    If probe <= 0 Then probe = 4
+    SpaceWidth = probe
+End Function
+
+' Shrink the index text until the BOX fits the slide.
+'
+' The bodies are authored with spAutoFit, which does not clip -- it grows the
+' shape. So the failure is never "text outside its box", it is the box itself
+' walking off the bottom of the slide while every stored rectangle still looks
+' correct. Measured 2026-08-27 on AICHI v11: 15 entries at 18pt leave about
+' 154pt of headroom, seven lines, so a few wrapped titles on a machine with
+' different font metrics are enough to push it over. Turning autosize off and
+' shrinking to fit makes that impossible rather than unlikely.
+Private Sub FitTocBody(ByVal body As Shape)
+    Dim bodyRange As TextRange
+    Dim targetSize As Single
+    Dim startSize As Single
+    Dim available As Single
+
+    If body.TextFrame.HasText <> msoTrue Then Exit Sub
+
+    body.TextFrame2.AutoSize = msoAutoSizeNone
+    body.TextFrame.WordWrap = msoTrue
+    available = UsableHeight(body)
+
+    Set bodyRange = body.TextFrame.TextRange
+    targetSize = mPlannedSize
+    If targetSize <= 0 Or targetSize > mFontMax Then targetSize = mFontMax
+    startSize = targetSize
+    bodyRange.Font.Size = targetSize
+
+    Do While bodyRange.BoundHeight > available And targetSize > mFontMin
+        targetSize = targetSize - 0.5
+        If targetSize < mFontMin Then targetSize = mFontMin
+        bodyRange.Font.Size = targetSize
+    Loop
+
+    ' The tab stop was measured at the planned size. If this had to shrink, the
+    ' stop is stale and the prefixes go ragged -- the original complaint.
+    If targetSize < startSize Then SetPrefixTabStop body
+
+    If bodyRange.BoundHeight > available Then NoteOverfull body.Parent
+End Sub
+
+' The separator this host uses, read off the presentation's own path.
+'
+' PowerPoint's Application has NO PathSeparator -- that member is Word and
+' Excel only. Referencing it stops the whole module at COMPILE time with
+' "Method or data member not found", before a single line runs, so every
+' routine here is dead until it is gone. Reported from MACROS_dev.pptm on
+' 2026-08-28 and not caught by anything earlier: the structure checker reads
+' block balance and undefined calls, and cannot know which members a host
+' application actually has.
+'
+' FullName is Path + separator + Name, so the character just past the end of
+' Path IS the separator, on whichever platform this is running.
+Private Function PathSeparatorOf(ByVal pres As Presentation) As String
+    Dim tail As String
+
+    tail = Mid$(pres.FullName, Len(pres.Path) + 1, 1)
+    If tail = "\" Or tail = "/" Then
+        PathSeparatorOf = tail
+    Else
+        PathSeparatorOf = "\"
+    End If
+End Function
+
+Private Function BackupName() As String
+    Dim separatorPosition As Long
+    Dim slashPosition As Long
+
+    ' Both spellings, because this reads a stored string rather than a live
+    ' presentation and must not care which platform wrote it.
+    separatorPosition = InStrRev(mBackupPath, "\")
+    slashPosition = InStrRev(mBackupPath, "/")
+    If slashPosition > separatorPosition Then separatorPosition = slashPosition
+    If separatorPosition > 0 Then
+        BackupName = Mid$(mBackupPath, separatorPosition + 1)
+    Else
+        BackupName = mBackupPath
+    End If
+End Function
+
+Private Sub NoteOverfull(ByVal sld As Slide)
+    Dim label As String
+    label = CStr(sld.SlideIndex)
+    If InStr(1, "," & mOverfullSlides & ",", "," & label & ",") > 0 Then Exit Sub
+    If Len(mOverfullSlides) > 0 Then mOverfullSlides = mOverfullSlides & ","
+    mOverfullSlides = mOverfullSlides & label
+End Sub
+
+' Where to cut the index, and at what size.
+'
+' The rule the deck has to satisfy is one thing: every entry is on the slide.
+' Not "the two columns look even" -- that was this routine's objective until
+' 2026-08-28 and it was the wrong one. Even-looking columns with the last entry
+' hanging below the slide edge is a failure; a lopsided pair with everything
+' visible is not.
+'
+' So fill from the top of the left column, keep going while it still fits, and
+' send the remainder right. Shrink the type only when no cut fits at the current
+' size, because small type is a cost to accept last, not a knob to turn first.
+'
+' Largest size first, and within a size the largest left column, is a search
+' over (size, cut). Two facts make it cheap:
+'
+'   - the left column only grows as the cut moves down, so at a fixed size the
+'     largest workable cut is the first fit walking down from the top;
+'   - moving the cut back up to help the right column makes the right column
+'     BIGGER, not smaller. Once the left fits and the right does not, no other
+'     cut at this size will do either -- drop a size instead.
+'
+' That turns a (sizes x cuts) grid into one walk per size, exiting at the first
+' size that works.
+Private Function ColumnSplit(ByVal pres As Presentation, ByVal tocSlide As Slide) As Long
+    Dim leftBody As Shape
+    Dim rightBody As Shape
+
+    Set leftBody = FindNamedShape(tocSlide, TOC_BODY_LEFT)
+    Set rightBody = FindNamedShape(tocSlide, TOC_BODY_RIGHT)
+    ' No fallback cut here. A guessed number that renders without complaint is
+    ' exactly the failure this rewrite removes.
+    If leftBody Is Nothing Or rightBody Is Nothing Then
+        Err.Raise vbObjectError + 2117, , _
+            "Index slide " & tocSlide.SlideIndex & " is missing a column body shape."
+    End If
+
+    ' Every index page lists the SAME entries, so the answer is a property of
+    ' the deck and the box geometry -- not of which page we happen to be on.
+    ' Keying the cache on SlideIndex re-ran the whole search once per index
+    ' page: nine full searches for one answer, and the run took long enough
+    ' that it read as a hang.
+    If mSplitCached > 0 _
+       And leftBody.Width = mPlannedLeftWidth _
+       And rightBody.Width = mPlannedRightWidth _
+       And UsableHeight(leftBody) = mPlannedRoom Then
+        ColumnSplit = mSplitCached
+        Exit Function
+    End If
+
+    mSplitCached = PlanColumns(pres, tocSlide, leftBody, rightBody)
+    mSplitSlideIndex = tocSlide.SlideIndex
+    mPlannedLeftWidth = leftBody.Width
+    mPlannedRightWidth = rightBody.Width
+    mPlannedRoom = UsableHeight(leftBody)
+    ColumnSplit = mSplitCached
+End Function
+
+' Settle the size and the cut together, since neither is decidable alone.
+' Records the size in mPlannedSize; returns the cut.
+'
+' BOTH SEARCHES BISECT, and the reason is the same for each: the quantity is
+' monotone. A column only grows as the cut moves down (more entries) and as the
+' type grows. So "does the left column fit?" flips exactly once as the cut
+' moves, and "is there any workable cut?" flips exactly once as the size moves.
+' A value that flips once is found by halving the range, not by walking it.
+'
+' Walking it is what shipped first, and it was unusable: nine index pages, each
+' re-running a search of ~21 sizes x 8 cuts, every step of which fills and
+' measures a real column over COM. That is on the order of 1500 full layouts
+' for one answer, and it presents to the operator as PowerPoint hung. Bisection
+' plus caching the answer for the whole deck brings it to about 20.
+Private Function PlanColumns(ByVal pres As Presentation, ByVal tocSlide As Slide, _
+                             ByVal leftBody As Shape, ByVal rightBody As Shape) As Long
+    Dim highest As Long
+    Dim leftRoom As Single
+    Dim rightRoom As Single
+    Dim steps As Long
+    Dim lo As Long
+    Dim hi As Long
+    Dim mid As Long
+    Dim trySize As Single
+    Dim cut As Long
+    Dim bestCut As Long
+    Dim bestSize As Single
+    Dim fits As Boolean
+
+    highest = EntryCount(pres)
+    If highest <= 1 Then
+        mPlannedSize = mFontMax
+        PlanColumns = 1
+        Exit Function
+    End If
+
+    leftRoom = UsableHeight(leftBody)
+    rightRoom = UsableHeight(rightBody)
+
+    steps = CLng((mFontMax - mFontMin) / 0.5)
+    If steps < 0 Then steps = 0
+    lo = 0
+    hi = steps
+    bestCut = 0
+    bestSize = mFontMin
+
+    Do While lo <= hi
+        mid = (lo + hi) \ 2
+        trySize = mFontMin + mid * 0.5
+        cut = LargestFittingCut(pres, tocSlide, leftBody, highest, trySize, leftRoom)
+        fits = False
+        If cut > 0 Then
+            ' The right column only shrinks as the cut moves down, so the cut
+            ' that maximises the left is also the kindest one to the right.
+            ' If it does not fit here, no cut at this size will.
+            If ColumnHeightAt(pres, tocSlide, rightBody, False, cut, trySize) <= rightRoom Then
+                fits = True
+            End If
+        End If
+        If fits Then
+            bestSize = trySize
+            bestCut = cut
+            lo = mid + 1
+        Else
+            hi = mid - 1
+        End If
+    Loop
+
+    If bestCut > 0 Then
+        mPlannedSize = bestSize
+        PlanColumns = bestCut
+        Exit Function
+    End If
+
+    ' Nothing fits even at the smallest size the config allows. Name the slide
+    ' on the status line rather than cropping quietly, and give the left column
+    ' as much as it can hold so the overflow is at one end instead of both.
+    mPlannedSize = mFontMin
+    NoteOverfull tocSlide
+    bestCut = LargestFittingCut(pres, tocSlide, leftBody, highest, mFontMin, leftRoom)
+    If bestCut <= 0 Then bestCut = 1
+    PlanColumns = bestCut
+End Function
+
+' The largest cut whose left column still fits, or 0 if none does.
+'
+' Bisection: the left column only grows as the cut moves down, so "it fits"
+' is true for every cut up to some boundary and false after it. Halving finds
+' that boundary in about three measurements where walking took eight, and each
+' measurement is a real fill-and-measure over COM.
+Private Function LargestFittingCut(ByVal pres As Presentation, ByVal tocSlide As Slide, _
+                                   ByVal leftBody As Shape, ByVal highest As Long, _
+                                   ByVal fontSize As Single, ByVal room As Single) As Long
+    Dim lo As Long
+    Dim hi As Long
+    Dim mid As Long
+    Dim best As Long
+
+    lo = 1
+    hi = highest - 1
+    best = 0
+    Do While lo <= hi
+        mid = (lo + hi) \ 2
+        If ColumnHeightAt(pres, tocSlide, leftBody, True, mid, fontSize) <= room Then
+            best = mid
+            lo = mid + 1
+        Else
+            hi = mid - 1
+        End If
+    Loop
+    LargestFittingCut = best
+End Function
+
+' How many entries the index carries -- the search space for the cut.
+Private Function EntryCount(ByVal pres As Presentation) As Long
+    Dim sld As Slide
+
+    For Each sld In pres.Slides
+        If ShouldIncludeInToc(sld) Then EntryCount = EntryCount + 1
+    Next sld
+End Function
+
+' The height the text may occupy, which is not the height of the box.
+Private Function UsableHeight(ByVal body As Shape) As Single
+    UsableHeight = body.Height - body.TextFrame.MarginTop - body.TextFrame.MarginBottom
+    If UsableHeight <= 0 Then Err.Raise vbObjectError + 2115, , _
+        "Index body " & body.Name & " has no usable height."
+End Function
+
+' Fill one column for a trial cut at a trial size and report how tall it came out.
+'
+' This goes through LayOutColumn, the same routine that builds the real column,
+' because a trial that skips the indent, the weight or the tab stop measures a
+' column that will never be rendered -- and reports a fit for text that then
+' hangs off the slide. The trial text is thrown away; RebuildTocColumn writes
+' the final one with colours and links straight after.
+Private Function ColumnHeightAt(ByVal pres As Presentation, ByVal tocSlide As Slide, _
+                                ByVal body As Shape, ByVal isLeftColumn As Boolean, _
+                                ByVal splitAfter As Long, ByVal fontSize As Single) As Single
+    If LayOutColumn(pres, body, isLeftColumn, splitAfter, fontSize) = 0 Then
+        ColumnHeightAt = 0
+        Exit Function
+    End If
+    ColumnHeightAt = body.TextFrame.TextRange.BoundHeight
+End Function
+
+' Write one column's entries and give them the shape they will have on the
+' slide: size, weight, indent level, tab stop. Returns the entry count.
+'
+' Trial fills and the final build both come through here. Keeping one routine
+' is what makes the measurement above trustworthy -- when this changes, what
+' was measured changes with it.
+'
+' Order matters. The weight is applied BEFORE the tab stop is measured, because
+' a section line's prefix is bold and a stop measured on the regular weight
+' lands short of it.
+Private Function LayOutColumn(ByVal pres As Presentation, ByVal body As Shape, _
+                              ByVal isLeftColumn As Boolean, ByVal splitAfter As Long, _
+                              ByVal fontSize As Single) As Long
+    Dim target As Slide
+    Dim targetIndex As Long
+    Dim targetSection As Long
+    Dim position As Long
+    Dim tocText As String
+    Dim lineNumber As Long
+    Dim paragraphRange As TextRange
+
+    For targetIndex = 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        If ShouldIncludeInToc(target) Then
+            position = position + 1
+            targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
+            If BelongsInColumn(position, isLeftColumn, splitAfter) Then
+                If Len(tocText) > 0 Then tocText = tocText & vbCrLf
+                tocText = tocText & NavigationEntryText(target)
+                LayOutColumn = LayOutColumn + 1
+            End If
+        End If
+    Next targetIndex
+
+    body.TextFrame2.AutoSize = msoAutoSizeNone
+    body.TextFrame.WordWrap = msoTrue
+    body.TextFrame.TextRange.text = tocText
+    If LayOutColumn = 0 Then Exit Function
+
+    body.TextFrame.TextRange.Font.Size = fontSize
+    body.TextFrame.TextRange.Font.Bold = msoFalse
+    body.TextFrame.TextRange.Font.Underline = msoFalse
+
+    lineNumber = 0
+    position = 0
+    For targetIndex = 1 To pres.Slides.Count
+        Set target = pres.Slides(targetIndex)
+        If ShouldIncludeInToc(target) Then
+            position = position + 1
+            targetSection = CLng(Val(SlideTag(target, TAG_NAV_CODE)))
+            If BelongsInColumn(position, isLeftColumn, splitAfter) Then
+                lineNumber = lineNumber + 1
+                Set paragraphRange = body.TextFrame.TextRange.Paragraphs(lineNumber, 1)
+                If IsTocSlide(target) Then
+                    paragraphRange.IndentLevel = 1
+                    EntryRange(paragraphRange).Font.Bold = msoTrue
+                    EntryRange(paragraphRange).Font.Underline = msoTrue
+                Else
+                    paragraphRange.IndentLevel = 2
+                End If
+            End If
+        End If
+    Next targetIndex
+
+    ' The hanging indent and the tab stop are the same measurement, so one
+    ' routine owns both. Setting them apart is how they drift.
+    SetPrefixTabStop body
+End Function
+
+' Which column an entry belongs to, by its POSITION in the index.
+'
+' The cut used to be a SECTION boundary, which cannot balance a deck whose
+' sections differ in size. Measured 2026-08-28 with every hidden slide shown
+' (54 entries): section 3 alone holds 21, so cutting after section 2 leaves 10
+' entries on the left and 44 on the right, while cutting after section 3 puts
+' 30 left. There is nothing in between, so the search took 10/44 and 135 index
+' shapes ran off the page. The operator predicted this before it was measured:
+' "I have not checked what happens when slides are added."
+'
+' A position can fall anywhere, including inside a section -- which is also
+' what "fill from the top left, then carry on down the right" actually means.
+Private Function BelongsInColumn(ByVal position As Long, ByVal isLeftColumn As Boolean, _
+                                 ByVal splitAfter As Long) As Boolean
+    If isLeftColumn Then
+        BelongsInColumn = (position <= splitAfter)
+    Else
+        BelongsInColumn = (position > splitAfter)
+    End If
+End Function
+
+' A paragraph without its trailing newline. Styling the newline is what leaves
+' an underline running past the end of a line.
+Private Function EntryRange(ByVal paragraphRange As TextRange) As TextRange
+    Dim entryLength As Long
+    Dim lastCharacter As String
+
+    entryLength = Len(paragraphRange.text)
+    Do While entryLength > 0
+        lastCharacter = Mid$(paragraphRange.text, entryLength, 1)
+        If lastCharacter <> vbCr And lastCharacter <> vbLf Then Exit Do
+        entryLength = entryLength - 1
+    Loop
+    Set EntryRange = paragraphRange.Characters(1, entryLength)
+End Function
+
+' Give both columns the same vertical band before anything is measured.
+'
+' In v18 the left box is 826pt tall and the right 265pt, on every index slide.
+' Neither number was chosen: spAutoFit grew each box to its own content, so the
+' column with more entries ended up with more room, which is backwards. Both
+' get the same top and the same height -- the band from the top of the boxes to
+' the bottom of the slide -- and then the fit is a fair question.
+'
+' Widths are left alone. They differ too (363.6 vs 291.6), but that is a layout
+' decision someone made, not an artefact, and the measurement above accounts
+' for it.
+Private Sub NormaliseTocBoxes(ByVal pres As Presentation, _
+                              ByVal leftBody As Shape, ByVal rightBody As Shape)
+    Dim topEdge As Single
+    Dim band As Single
+
+    topEdge = leftBody.Top
+    If rightBody.Top < topEdge Then topEdge = rightBody.Top
+
+    band = pres.PageSetup.SlideHeight - topEdge - BottomMargin(pres)
+    If band <= 0 Then Err.Raise vbObjectError + 2116, , _
+        "No vertical room for the index columns."
+
+    leftBody.TextFrame2.AutoSize = msoAutoSizeNone
+    rightBody.TextFrame2.AutoSize = msoAutoSizeNone
+    leftBody.Top = topEdge
+    rightBody.Top = topEdge
+    leftBody.Height = band
+    rightBody.Height = band
+End Sub
+
+' How much to keep clear below the index. Derived from the slide, not chosen:
+' the same proportion the top margin already uses.
+Private Function BottomMargin(ByVal pres As Presentation) As Single
+    BottomMargin = pres.PageSetup.SlideHeight * 0.02
+End Function
 
 Private Sub ClearTextHyperlink(ByVal textRange As TextRange)
     On Error Resume Next
@@ -558,20 +1358,38 @@ Private Sub ApplyTypography(ByVal pres As Presentation)
                 If IsTypographyManagedShape(shp) And shp.HasTextFrame = msoTrue Then
                     If shp.TextFrame.HasText = msoTrue Then
                         Set textRange = shp.TextFrame.TextRange
-                        textRange.Font.Name = mFontLatin
-                        On Error Resume Next
-                        textRange.Font.NameFarEast = mFontCjk
-                        On Error GoTo 0
+                        If IsTitleShape(shp) Then
+                            ' Bind to the THEME fonts rather than stamping a
+                            ' literal face. Writing "Arial" here is what made
+                            ' the titles disagree with the master: the master
+                            ' asks for the theme major font and this line
+                            ' overwrote it on every run.
+                            textRange.Font.Name = "+mj-lt"
+                            On Error Resume Next
+                            textRange.Font.NameFarEast = "+mj-ea"
+                            On Error GoTo 0
+                        Else
+                            textRange.Font.Name = mFontLatin
+                            On Error Resume Next
+                            textRange.Font.NameFarEast = mFontCjk
+                            On Error GoTo 0
+                        End If
                         originalSize = CSng(Val(ShapeTag(shp, TAG_ORIGINAL_FONT_SIZE)))
                         If originalSize <= 0 Then
                             originalSize = textRange.Characters(1, 1).Font.Size
                             If originalSize <= 0 Then originalSize = mFontMin
                             shp.Tags.Add TAG_ORIGINAL_FONT_SIZE, CStr(originalSize)
                         End If
-                        targetSize = originalSize
-                        If targetSize < mFontMin Then targetSize = mFontMin
-                        If targetSize > mFontMax Then targetSize = mFontMax
-                        textRange.Font.Size = targetSize
+                        ' Titles are sized by FitTocTitles, which picks one
+                        ' size that fits every title in the deck. Setting a
+                        ' size here too meant two routines deciding the same
+                        ' thing, and the second one silently winning.
+                        If Not IsTitleShape(shp) Then
+                            targetSize = originalSize
+                            If targetSize < mFontMin Then targetSize = mFontMin
+                            If targetSize > mFontMax Then targetSize = mFontMax
+                            textRange.Font.Size = targetSize
+                        End If
                     End If
                 End If
             Next shp
@@ -583,6 +1401,10 @@ Private Function ShapeTag(ByVal shp As Shape, ByVal tagName As String) As String
     On Error Resume Next
     ShapeTag = Trim$(shp.Tags(tagName))
     On Error GoTo 0
+End Function
+
+Private Function IsTitleShape(ByVal shp As Shape) As Boolean
+    IsTitleShape = (StrComp(shp.Name, TITLE_SHAPE, vbTextCompare) = 0)
 End Function
 
 Private Function IsTypographyManagedShape(ByVal shp As Shape) As Boolean
