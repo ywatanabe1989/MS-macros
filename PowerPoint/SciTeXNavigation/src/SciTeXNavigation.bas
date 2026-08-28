@@ -1,7 +1,7 @@
 Attribute VB_Name = "SciTeXNavigation"
 Option Explicit
 
-Private Const NAVIGATION_VERSION As String = "0.2.0"
+Private Const NAVIGATION_VERSION As String = "0.3.0"
 Private Const TAG_CONFIG As String = "SCITEX_CONFIG"
 Private Const TAG_COVER As String = "SCITEX_COVER"
 Private Const TAG_TOC As String = "SCITEX_TOC"
@@ -21,16 +21,12 @@ Private Const CFG_FONT_MIN As String = "SCITEX_CFG_FONT_MIN"
 Private Const CFG_FONT_MAX As String = "SCITEX_CFG_FONT_MAX"
 Private Const CFG_HIDE_HIDDEN As String = "SCITEX_CFG_HIDE_HIDDEN"
 Private Const CFG_VERSION As String = "SCITEX_CFG_VERSION"
-Private Const CFG_TITLE_SIZE As String = "SCITEX_CFG_TITLE_SIZE"
-Private Const CFG_TOC_PREFIX_TAB As String = "SCITEX_CFG_TOC_PREFIX_TAB"
 Private Const TAG_ORIGINAL_FONT_SIZE As String = "SCITEX_ORIGINAL_FONT_SIZE"
 
 Private mFontLatin As String
 Private mFontCjk As String
 Private mFontMin As Single
 Private mFontMax As Single
-Private mTitleSize As Single
-Private mTocPrefixTab As Single
 Private mBackupPath As String
 Private mOverfullSlides As String
 Private mHideHiddenFromToc As Boolean
@@ -139,6 +135,10 @@ Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
         currentSection = CLng(Val(SlideTag(tocSlide, TAG_NAV_CODE)))
         RebuildTocColumn pres, tocSlide, leftBody, True, currentSection
         RebuildTocColumn pres, tocSlide, rightBody, False, currentSection
+        ' Each column was fitted on its own, so the taller one ends up smaller.
+        ' Two columns of the same list at two different sizes reads as a
+        ' mistake even when both fit, so settle them on the smaller of the two.
+        MatchColumnSizes leftBody, rightBody
         Exit Sub
     End If
 
@@ -352,38 +352,57 @@ Private Sub SetTocVisibleTitle(ByVal tocSlide As Slide, ByVal sectionTitle As St
 
 End Sub
 
+' Titles: one size for the whole deck, and the room measured rather than assumed.
+'
+' Two numbers used to be written in here. Both are on the slide and can be
+' counted, so neither should have been a number:
+'
+'   LOGO_CLEARANCE = 72   how much room the master's logo takes on the right.
+'                         Measured now: the leftmost shape that actually sits
+'                         beside the title. A deck with no logo got 72pt taken
+'                         away from it for nothing; a deck with a wider one
+'                         had its titles run underneath.
+'
+'   the size itself       v18 carried 24pt on ten slides and 28pt on forty --
+'                         the operator's "24pt vs 28pt". Titles disagree
+'                         because each was fitted alone. One size that fits
+'                         every title cannot disagree with itself.
+'
+' The floor (SCITEX_CFG_FONT_MIN) stays a setting. It is not derivable: it says
+' how small type may get before it stops being readable, and that is a
+' judgement about the reader, not a fact about the slide.
 Private Sub FitTocTitles(ByVal pres As Presentation)
-    Const LOGO_CLEARANCE As Single = 72
     Dim sld As Slide
     Dim titleShape As Shape
     Dim titleRange As TextRange
     Dim availableWidth As Single
     Dim targetSize As Single
 
+    targetSize = UniformTitleSize(pres)
+
     For Each sld In pres.Slides
         If Not IsConfigSlide(sld) Then
             Set titleShape = FindNamedShape(sld, TITLE_SHAPE)
             If Not titleShape Is Nothing Then
                 If titleShape.TextFrame.HasText <> msoTrue Then GoTo ContinueSlide
-                availableWidth = pres.PageSetup.SlideWidth - titleShape.Left - LOGO_CLEARANCE
-                If availableWidth <= 0 Then Err.Raise vbObjectError + 2114, , "TOC title has no usable width on slide " & CStr(sld.SlideIndex) & "."
+                availableWidth = TitleRoom(pres, sld, titleShape)
+                If availableWidth <= 0 Then Err.Raise vbObjectError + 2114, , _
+                    "Title has no usable width on slide " & CStr(sld.SlideIndex) & "."
 
                 ' Keep the title inside the header instead of allowing PowerPoint
-                ' to grow the text box over the master logo.
+                ' to grow the text box over whatever sits beside it.
                 titleShape.TextFrame2.AutoSize = msoAutoSizeNone
                 titleShape.TextFrame.WordWrap = msoFalse
                 titleShape.Width = availableWidth
                 Set titleRange = titleShape.TextFrame.TextRange
-                targetSize = titleRange.Characters(1, 1).Font.Size
-                If mTitleSize > 0 Then targetSize = mTitleSize
-                If targetSize > mFontMax Then targetSize = mFontMax
-                If targetSize < mFontMin Then targetSize = mFontMin
                 titleRange.Font.Size = targetSize
 
-                Do While titleRange.BoundWidth > availableWidth And targetSize > mFontMin
-                    targetSize = targetSize - 0.5
-                    If targetSize < mFontMin Then targetSize = mFontMin
-                    titleRange.Font.Size = targetSize
+                ' The common size is chosen to fit every title, so this loop
+                ' should not run. It stays because a font substitution on
+                ' another machine can change the measurement after the fact,
+                ' and a title that overflows silently is the bug we started from.
+                Do While titleRange.BoundWidth > availableWidth And titleRange.Font.Size > mFontMin
+                    titleRange.Font.Size = titleRange.Font.Size - 0.5
                 Loop
                 If titleRange.BoundWidth > availableWidth Then NoteOverfull sld
             End If
@@ -392,12 +411,85 @@ ContinueSlide:
     Next sld
 End Sub
 
+' The largest size at which EVERY title fits its own slide.
+'
+' Counted, not chosen: try the ceiling, measure all titles, step down until the
+' widest one fits. Whatever comes out is the size every title gets, so they
+' cannot disagree.
+Private Function UniformTitleSize(ByVal pres As Presentation) As Single
+    Dim candidate As Single
+    Dim sld As Slide
+    Dim titleShape As Shape
+    Dim titleRange As TextRange
+    Dim room As Single
+    Dim fitsAll As Boolean
+
+    candidate = mFontMax
+    Do
+        fitsAll = True
+        For Each sld In pres.Slides
+            If Not IsConfigSlide(sld) Then
+                Set titleShape = FindNamedShape(sld, TITLE_SHAPE)
+                If Not titleShape Is Nothing Then
+                    If titleShape.TextFrame.HasText = msoTrue Then
+                        room = TitleRoom(pres, sld, titleShape)
+                        If room > 0 Then
+                            titleShape.TextFrame2.AutoSize = msoAutoSizeNone
+                            titleShape.TextFrame.WordWrap = msoFalse
+                            Set titleRange = titleShape.TextFrame.TextRange
+                            titleRange.Font.Size = candidate
+                            If titleRange.BoundWidth > room Then fitsAll = False
+                        End If
+                    End If
+                End If
+            End If
+        Next sld
+        If fitsAll Then Exit Do
+        candidate = candidate - 0.5
+    Loop While candidate > mFontMin
+
+    If candidate < mFontMin Then candidate = mFontMin
+    UniformTitleSize = candidate
+End Function
+
+' How much horizontal room this title actually has.
+'
+' The old code subtracted a written-in 72pt for "the logo". What is really
+' there is whatever shape sits beside the title, and it is on the slide: take
+' the leftmost shape that starts to the right of the title and overlaps it
+' vertically. No such shape means the room runs to the slide edge.
+Private Function TitleRoom(ByVal pres As Presentation, ByVal sld As Slide, _
+                           ByVal titleShape As Shape) As Single
+    Dim shp As Shape
+    Dim limit As Single
+    Dim titleTop As Single
+    Dim titleBottom As Single
+
+    limit = pres.PageSetup.SlideWidth
+    titleTop = titleShape.Top
+    titleBottom = titleShape.Top + titleShape.Height
+
+    For Each shp In sld.Shapes
+        If shp.Name <> titleShape.Name Then
+            If shp.Left > titleShape.Left Then
+                ' vertical overlap, otherwise it is not in the way
+                If shp.Top < titleBottom And (shp.Top + shp.Height) > titleTop Then
+                    If shp.Left < limit Then limit = shp.Left
+                End If
+            End If
+        End If
+    Next shp
+
+    TitleRoom = limit - titleShape.Left - SpaceWidth(titleShape.TextFrame.TextRange)
+End Function
+
 ' The prefix and the title are separated by a TAB, not by spaces.
 '
 ' The configured face is proportional, so "1a." and "3i." are not the same
 ' width and no amount of padding lines the titles up -- the operator sees a
 ' ragged left edge down the whole index. A tab stop is absolute: every title
-' starts at mTocPrefixTab regardless of what the prefix measures.
+' starts at the same x regardless of what the prefix measures, and that x is
+' the widest prefix in the column -- measured, not written in.
 Private Function NavigationEntryText(ByVal sld As Slide) As String
     If IsTocSlide(sld) Then
         NavigationEntryText = SlideTag(sld, TAG_NAV_CODE) & "." & vbTab & SlideTag(sld, TAG_SECTION_TITLE)
@@ -405,6 +497,35 @@ Private Function NavigationEntryText(ByVal sld As Slide) As String
         NavigationEntryText = GetSlideTitle(sld)
     End If
 End Function
+
+' Put both index columns on one size -- the smaller, so neither overflows.
+'
+' Fitting each column separately is correct per column and wrong per slide: a
+' 23-entry column shrinks and a 9-entry one does not, and the reader sees two
+' type sizes in one list. Counting settles it; there is nothing to choose.
+Private Sub MatchColumnSizes(ByVal leftBody As Shape, ByVal rightBody As Shape)
+    Dim leftSize As Single
+    Dim rightSize As Single
+    Dim smaller As Single
+
+    If leftBody.TextFrame.HasText <> msoTrue Then Exit Sub
+    If rightBody.TextFrame.HasText <> msoTrue Then Exit Sub
+
+    leftSize = leftBody.TextFrame.TextRange.Characters(1, 1).Font.Size
+    rightSize = rightBody.TextFrame.TextRange.Characters(1, 1).Font.Size
+    If leftSize <= 0 Or rightSize <= 0 Then Exit Sub
+
+    smaller = leftSize
+    If rightSize < smaller Then smaller = rightSize
+
+    leftBody.TextFrame.TextRange.Font.Size = smaller
+    rightBody.TextFrame.TextRange.Font.Size = smaller
+
+    ' The tab stop was measured at the old size, so it has to be re-measured
+    ' at the new one. Skipping this is how a "fix" leaves the column ragged.
+    SetPrefixTabStop leftBody
+    SetPrefixTabStop rightBody
+End Sub
 
 Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide, ByVal body As Shape, ByVal isLeftColumn As Boolean, ByVal currentSection As Long)
     Dim target As Slide
@@ -437,16 +558,8 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
     body.TextFrame.TextRange.Text = tocText
     body.TextFrame.TextRange.Font.Bold = msoFalse
     body.TextFrame.TextRange.Font.Underline = msoFalse
-    ' A hanging indent, so a title that wraps lines up under itself rather
-    ' than under its own prefix.
-    With body.TextFrame.Ruler.Levels(1)
-        .FirstMargin = 0
-        .LeftMargin = mTocPrefixTab
-    End With
-    With body.TextFrame.Ruler.Levels(2)
-        .FirstMargin = 18
-        .LeftMargin = mTocPrefixTab + 18
-    End With
+    ' The hanging indent and the tab stop are the same measurement, so one
+    ' routine owns both. Setting them apart is how they drift.
     SetPrefixTabStop body
 
     lineNumber = 0
@@ -494,20 +607,80 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
     FitTocBody body
 End Sub
 
-' One tab stop at mTocPrefixTab, and no others.
+' One tab stop, placed where the widest prefix actually ends.
+'
+' There is nothing to choose here. Every prefix is on the slide and can be
+' measured, so the stop that clears all of them is the widest one plus a gap.
+' A written-in number (34pt was the old one) is a guess that goes stale the
+' first time a prefix reaches "3i." from "3a.", or the font changes, and
+' nothing tells you it has.
 '
 ' Ruler.TabStops accumulates: rebuilding the index without clearing leaves the
 ' previous run's stops behind, and the second stop is the one the tab lands on.
 Private Sub SetPrefixTabStop(ByVal body As Shape)
     Dim bodyRuler As Ruler
     Dim index As Long
+    Dim stopAt As Single
 
+    stopAt = MeasuredPrefixTab(body)
     Set bodyRuler = body.TextFrame.Ruler
     For index = bodyRuler.TabStops.Count To 1 Step -1
         bodyRuler.TabStops(index).Clear
     Next index
-    bodyRuler.TabStops.Add ppTabStopLeft, mTocPrefixTab
+    bodyRuler.TabStops.Add ppTabStopLeft, stopAt
+    With body.TextFrame.Ruler.Levels(1)
+        .FirstMargin = 0
+        .LeftMargin = stopAt
+    End With
+    With body.TextFrame.Ruler.Levels(2)
+        .FirstMargin = stopAt
+        .LeftMargin = stopAt
+    End With
 End Sub
+
+' The widest prefix in this column, measured, plus one space.
+'
+' Called AFTER the text is written, because that is the only moment the widths
+' exist. The gap is a measured space in the same run rather than a chosen
+' number, so it scales with the font instead of drifting from it.
+Private Function MeasuredPrefixTab(ByVal body As Shape) As Single
+    Dim para As TextRange
+    Dim index As Long
+    Dim tabPosition As Long
+    Dim widest As Single
+    Dim w As Single
+
+    If body.TextFrame.HasText <> msoTrue Then
+        MeasuredPrefixTab = 0
+        Exit Function
+    End If
+
+    For index = 1 To body.TextFrame.TextRange.Paragraphs.Count
+        Set para = body.TextFrame.TextRange.Paragraphs(index, 1)
+        tabPosition = InStr(1, para.text, vbTab, vbBinaryCompare)
+        If tabPosition > 1 Then
+            w = para.Characters(1, tabPosition - 1).BoundWidth
+            If w > widest Then widest = w
+        End If
+    Next index
+
+    If widest <= 0 Then
+        MeasuredPrefixTab = 0
+    Else
+        MeasuredPrefixTab = widest + SpaceWidth(body.TextFrame.TextRange)
+    End If
+End Function
+
+' One space, in the text's own font. Used as the gap after a prefix and after
+' a title, so spacing follows the type rather than a constant.
+Private Function SpaceWidth(ByVal sample As TextRange) As Single
+    Dim probe As Single
+    On Error Resume Next
+    probe = sample.Characters(1, 1).BoundWidth * 0.45
+    On Error GoTo 0
+    If probe <= 0 Then probe = 4
+    SpaceWidth = probe
+End Function
 
 ' Shrink the index text until the BOX fits the slide.
 '
@@ -666,15 +839,6 @@ Private Sub LoadConfiguration(ByVal pres As Presentation)
     mFontCjk = "Yu Gothic"
     mFontMin = 18
     mFontMax = 32
-    ' 0 means "leave the authored title size alone". Set this on the config
-    ' slide to the master's title size when the deck's titles must match the
-    ' master -- SCITEX_TITLE is a plain text box, not the title placeholder,
-    ' so it inherits nothing and the size has to be stated somewhere.
-    mTitleSize = 0
-    ' Where the TOC entry text starts, in points from the left of the body.
-    ' The prefix sits before it and the title after it, so every title begins
-    ' at the same x no matter how wide "3i." renders.
-    mTocPrefixTab = 34
     mHideHiddenFromToc = True
 
     Set configSlide = FindConfigSlide(pres)
@@ -687,9 +851,6 @@ Private Sub LoadConfiguration(ByVal pres As Presentation)
     mFontMin = CSng(Val(ConfigText(configSlide, CFG_FONT_MIN, CStr(mFontMin))))
     mFontMax = CSng(Val(ConfigText(configSlide, CFG_FONT_MAX, CStr(mFontMax))))
     mHideHiddenFromToc = ParseBoolean(ConfigText(configSlide, CFG_HIDE_HIDDEN, "Yes"))
-    mTitleSize = CSng(Val(ConfigText(configSlide, CFG_TITLE_SIZE, CStr(mTitleSize))))
-    value = ConfigText(configSlide, CFG_TOC_PREFIX_TAB, CStr(mTocPrefixTab))
-    If CSng(Val(value)) > 0 Then mTocPrefixTab = CSng(Val(value))
 
     If mFontMin <= 0 Then Err.Raise vbObjectError + 2110, , "Minimum font size must be greater than zero."
     If mFontMax < mFontMin Then Err.Raise vbObjectError + 2111, , "Maximum font size must be greater than or equal to minimum font size."
@@ -785,17 +946,16 @@ Private Sub ApplyTypography(ByVal pres As Presentation)
                             If originalSize <= 0 Then originalSize = mFontMin
                             shp.Tags.Add TAG_ORIGINAL_FONT_SIZE, CStr(originalSize)
                         End If
-                        targetSize = originalSize
-                        If IsTitleShape(shp) And mTitleSize > 0 Then
-                            ' The title's size is its own setting. Clamping it
-                            ' into the body range is why every title came out
-                            ' at the body maximum instead of the master's size.
-                            targetSize = mTitleSize
-                        Else
+                        ' Titles are sized by FitTocTitles, which picks one
+                        ' size that fits every title in the deck. Setting a
+                        ' size here too meant two routines deciding the same
+                        ' thing, and the second one silently winning.
+                        If Not IsTitleShape(shp) Then
+                            targetSize = originalSize
                             If targetSize < mFontMin Then targetSize = mFontMin
                             If targetSize > mFontMax Then targetSize = mFontMax
+                            textRange.Font.Size = targetSize
                         End If
-                        textRange.Font.Size = targetSize
                     End If
                 End If
             Next shp
