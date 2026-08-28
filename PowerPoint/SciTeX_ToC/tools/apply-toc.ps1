@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Apply SciTeXNavigation to a real deck and save the result beside it.
+Apply SciTeX_ToC to a real deck and save the result beside it.
 
 .DESCRIPTION
 build-and-test.ps1 builds a synthetic sandbox to exercise the macro. This runs
@@ -28,7 +28,7 @@ has already cost something:
   which is how the macro used to find its target: it broke into the VBE and sat
   there, invisible to this script, and the run simply never returned.
 
-  NAME THE TARGET EXPLICITLY.  The macro is invoked as RunSciTeXNavigationOn
+  NAME THE TARGET EXPLICITLY.  The macro is invoked as RefreshToCIn
   with the presentation as an argument, so "which deck" is never inferred.
 
   AccessVBOM is recorded, opened, and put back -- from the finally block, so a
@@ -38,7 +38,7 @@ has already cost something:
 The .pptx/.pptm to lay out.  Never modified.
 
 .PARAMETER ModulePath
-The exported SciTeXNavigation.bas to import.
+The exported SciTeX_ToC.bas to import.
 
 .PARAMETER Output
 Where to write the laid-out deck.  Must be .pptm: a deck carrying a macro
@@ -60,7 +60,7 @@ fine, so go through it:
 .EXAMPLE
 powershell -File apply-navigation.ps1 `
   -Deck   C:\Users\wyusu\Downloads\AICHI_v18.pptx `
-  -ModulePath C:\Users\wyusu\Template\SciTeXNavigation.bas `
+  -ModulePath C:\Users\wyusu\Template\SciTeX_ToC.bas `
   -Output C:\Users\wyusu\Downloads\AICHI_v18_nav.pptm
 #>
 param(
@@ -85,7 +85,7 @@ $vbomExisted = ($null -ne $securityItem -and
                 $securityItem.PSObject.Properties.Name -contains "AccessVBOM")
 $vbomOriginal = $(if ($vbomExisted) { $securityItem.AccessVBOM } else { 0 })
 
-$failure = Join-Path (Split-Path -Parent $Deck) "SciTeXNavigation.failure.txt"
+$failure = Join-Path (Split-Path -Parent $Deck) "SciTeX_ToC.failure.txt"
 Remove-Item -LiteralPath $failure -ErrorAction SilentlyContinue
 
 $app = $null
@@ -104,7 +104,7 @@ try {
     # A stale copy of the module would shadow the one under test.
     for ($i = $presentation.VBProject.VBComponents.Count; $i -ge 1; $i--) {
         $component = $presentation.VBProject.VBComponents.Item($i)
-        if ($component.Name -eq "SciTeXNavigation") {
+        if ($component.Name -eq "SciTeX_ToC") {
             $presentation.VBProject.VBComponents.Remove($component)
         }
     }
@@ -118,8 +118,8 @@ try {
     $app.GetType().InvokeMember(
         "Run",
         [System.Reflection.BindingFlags]::InvokeMethod,
-        $null, $app, @("RunSciTeXNavigationOn", $presentation)) | Out-Null
-    Write-Output "RunSciTeXNavigationOn returned"
+        $null, $app, @("RefreshToCIn", $presentation)) | Out-Null
+    Write-Output "RefreshToCIn returned"
 
     # 25 = ppSaveAsOpenXMLPresentationMacroEnabled
     $presentation.SaveAs($Output, 25)

@@ -25,7 +25,7 @@ travels alone -- it gets mailed, dropped in Teams, copied to a stick. Anything
 kept outside it is lost by the second hop.
 
 .PARAMETER ModulePath
-The exported SciTeXNavigation.bas to embed.
+The exported SciTeX_ToC.bas to embed.
 
 .PARAMETER Output
 Where to write the template. Must be .pptm.
@@ -88,7 +88,7 @@ try {
 Every index page in this deck is rebuilt from the slides themselves:
 numbering, titles, links, and the split across columns.
 
-To run it: Alt+F8 -> RunSciTeXNavigation -> Run.
+To run it: Alt+F8 -> RefreshToC -> Run.
 
 A copy of the file is saved beside it first, named
   <name>.before-navigation-<date>.pptm
@@ -148,21 +148,30 @@ on the status line rather than letting entries fall off the page.
     $cfg = Add-Page $pres "Configuration"
     $cfg.Tags.Add("SCITEX_CONFIG", "1") | Out-Null
     [void](Add-Box $cfg "CFG_HELP" "Edit the boxes on the right. The macro reads them on every run." 32 92 640 28 14 $MUTED $false)
+    # Each setting shows what it accepts, beside the box.
+    #
+    # NOT a dropdown. PowerPoint's only real one is an ActiveX ComboBox, which
+    # does not exist on Mac or in PowerPoint for the web and is commonly
+    # disabled by policy -- on a file meant to be handed to strangers that
+    # trades a small convenience for a control that is missing exactly where
+    # you cannot go and fix it. Printing the choices answers the same question
+    # ("what can I put here?") and cannot break.
     $labels = @(
-        @("Latin font",      "SCITEX_CFG_FONT_LATIN", "Segoe UI"),
-        @("Japanese font",   "SCITEX_CFG_FONT_CJK",   "Yu Gothic"),
-        @("Smallest type",   "SCITEX_CFG_FONT_MIN",   "12"),
-        @("Largest type",    "SCITEX_CFG_FONT_MAX",   "32"),
-        @("Skip hidden",     "SCITEX_CFG_HIDE_HIDDEN","Yes"),
-        @("Macro version",   "SCITEX_CFG_VERSION",    "0.4.0")
+        @("Latin font",    "SCITEX_CFG_FONT_LATIN",  "Segoe UI",  "any installed font"),
+        @("Japanese font", "SCITEX_CFG_FONT_CJK",    "Yu Gothic", "Yu Gothic / Meiryo / MS Gothic"),
+        @("Smallest type", "SCITEX_CFG_FONT_MIN",    "12",        "points; the floor when it will not fit"),
+        @("Largest type",  "SCITEX_CFG_FONT_MAX",    "32",        "points; the size it starts from"),
+        @("Skip hidden",   "SCITEX_CFG_HIDE_HIDDEN", "Yes",       "Yes / No"),
+        @("Macro version", "SCITEX_CFG_VERSION",     "0.5.0",     "written by the macro; do not edit")
     )
     $y = 132
     foreach ($row in $labels) {
-        [void](Add-Box $cfg ("LBL_" + $row[1]) $row[0] 32 $y 200 30 16 $MUTED $false)
-        $v = Add-Box $cfg $row[1] $row[2] 240 $y 220 30 16 $INK $true
+        [void](Add-Box $cfg ("LBL_" + $row[1]) $row[0] 32 $y 190 28 15 $MUTED $false)
+        $v = Add-Box $cfg $row[1] $row[2] 226 $y 180 28 15 $INK $true
         $v.Line.Visible = -1
         $v.Line.ForeColor.RGB = $ACCENT
-        $y += 40
+        [void](Add-Box $cfg ("HINT_" + $row[1]) $row[3] 416 $y 270 28 12 $MUTED $false)
+        $y += 36
     }
     [void](Add-Box $cfg "SCITEX_STATUS" "The macro writes what it did here." 32 470 640 28 12 $MUTED $false)
 
