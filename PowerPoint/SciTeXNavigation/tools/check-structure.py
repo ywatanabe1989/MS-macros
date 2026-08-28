@@ -13,6 +13,14 @@ type error; it catches the mistakes that come from editing a long module with
 a script -- a block left open, a routine ended with the wrong keyword, a name
 called but never defined.
 
+One more, added after it cost a round trip: members that the HOST APPLICATION
+does not have.  `Application.PathSeparator` is Word and Excel; PowerPoint has
+no such member, and referencing it fails at COMPILE time with "Method or data
+member not found" -- so the whole module is dead before a single line runs.
+The balance and undefined-call checks pass such a file cleanly, because the
+name is defined, just not here.  The list is small and explicit rather than a
+model of the object model; it holds only members confirmed absent.
+
 READING VBA AS TEXT
 -------------------
 Three things make naive line matching wrong, and all three produced false
@@ -139,6 +147,14 @@ def check(path: pathlib.Path, findings: list):
     for opener, opened in stack:
         findings.append(f"{path.name}:{opened}: {opener} is never closed")
 
+    for number, line in lines:
+        for member in HOST_MEMBER.findall(line):
+            fix = POWERPOINT_MISSING_APPLICATION_MEMBERS.get(member)
+            if fix:
+                findings.append(
+                    f"{path.name}:{number}: Application.{member} does not exist in "
+                    f"PowerPoint (compile error, whole module dead) -- {fix}")
+
     known = defined | VBA_BUILTINS
     for name, number in sorted(called.items(), key=lambda kv: kv[1]):
         if name not in known and name.startswith(("Set", "Fit", "Rebuild", "Column",
@@ -146,6 +162,29 @@ def check(path: pathlib.Path, findings: list):
                                                   "Belongs", "Entry", "Usable", "Highest",
                                                   "Largest", "Normalise", "Note", "Backup")):
             findings.append(f"{path.name}:{number}: calls {name}, which is not defined here")
+
+
+#: Members Word and Excel have and PowerPoint does not.  Each one compiles
+#: nowhere in PowerPoint, so a single use kills the module.  Keep this list to
+#: members actually CONFIRMED absent -- a wrong entry here turns a working file
+#: into a false finding, which is worse than the gap it fills.
+POWERPOINT_MISSING_APPLICATION_MEMBERS = {
+    # Word/Excel only. Cost a compile error in SciTeXNavigation on 2026-08-28.
+    "PathSeparator": "derive it from a presentation: Mid$(pres.FullName, Len(pres.Path) + 1, 1)",
+    # Excel's redraw suppression. PowerPoint has no equivalent property.
+    "ScreenUpdating": "PowerPoint has no equivalent; remove it",
+    "EnableEvents": "Excel only; remove it",
+    "Calculation": "Excel only; remove it",
+    "StatusBar": "Excel only; use the deck's own status shape",
+    "WorksheetFunction": "Excel only",
+    "ActiveDocument": "Word only; use ActivePresentation",
+    "ActiveWorkbook": "Excel only; use ActivePresentation",
+    "ActiveSheet": "Excel only; use ActiveWindow.View.Slide",
+    "Workbooks": "Excel only; use Presentations",
+    "Documents": "Word only; use Presentations",
+}
+
+HOST_MEMBER = re.compile(r"\bApplication\.([A-Za-z_]\w*)")
 
 
 VBA_BUILTINS = {

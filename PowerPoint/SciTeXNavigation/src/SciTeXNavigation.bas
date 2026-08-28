@@ -109,7 +109,7 @@ Private Sub BackupBeforeRun(ByVal pres As Presentation)
     If dotPosition > 1 Then baseName = Left$(baseName, dotPosition - 1)
 
     stamp = Format$(Now, "yyyymmdd-hhnnss")
-    backupPath = pres.Path & Application.PathSeparator & _
+    backupPath = pres.Path & PathSeparatorOf(pres) & _
         baseName & ".before-navigation-" & stamp & ".pptm"
 
     pres.SaveCopyAs backupPath, ppSaveAsOpenXMLPresentationMacroEnabled
@@ -695,9 +695,38 @@ Private Sub FitTocBody(ByVal body As Shape)
     If bodyRange.BoundHeight > available Then NoteOverfull body.Parent
 End Sub
 
+' The separator this host uses, read off the presentation's own path.
+'
+' PowerPoint's Application has NO PathSeparator -- that member is Word and
+' Excel only. Referencing it stops the whole module at COMPILE time with
+' "Method or data member not found", before a single line runs, so every
+' routine here is dead until it is gone. Reported from MACROS_dev.pptm on
+' 2026-08-28 and not caught by anything earlier: the structure checker reads
+' block balance and undefined calls, and cannot know which members a host
+' application actually has.
+'
+' FullName is Path + separator + Name, so the character just past the end of
+' Path IS the separator, on whichever platform this is running.
+Private Function PathSeparatorOf(ByVal pres As Presentation) As String
+    Dim tail As String
+
+    tail = Mid$(pres.FullName, Len(pres.Path) + 1, 1)
+    If tail = "\" Or tail = "/" Then
+        PathSeparatorOf = tail
+    Else
+        PathSeparatorOf = "\"
+    End If
+End Function
+
 Private Function BackupName() As String
     Dim separatorPosition As Long
-    separatorPosition = InStrRev(mBackupPath, Application.PathSeparator)
+    Dim slashPosition As Long
+
+    ' Both spellings, because this reads a stored string rather than a live
+    ' presentation and must not care which platform wrote it.
+    separatorPosition = InStrRev(mBackupPath, "\")
+    slashPosition = InStrRev(mBackupPath, "/")
+    If slashPosition > separatorPosition Then separatorPosition = slashPosition
     If separatorPosition > 0 Then
         BackupName = Mid$(mBackupPath, separatorPosition + 1)
     Else
