@@ -42,6 +42,11 @@ Private mPlannedRoom As Single
 '#: columns; two columns is just the case where mColumnCount is 2.
 Private mCuts() As Long
 Private mColumnCount As Long
+
+'#: True when a PERSON started this run, false when a script did.
+'#: Only the person gets a dialog: a message box in an automated run is a
+'#: window nobody is looking at, and the caller waits on it forever.
+Private mInteractive As Boolean
 Private mOverfullSlides As String
 Private mHideHiddenFromToc As Boolean
 Private mTwoColumnToc As Boolean
@@ -59,7 +64,9 @@ Private mTwoColumnToc As Boolean
 ' on this line and sat there. A headless caller cannot see that dialog, so the
 ' run simply never returned.
 Public Sub RefreshToC()
+    mInteractive = True
     RefreshToCIn ActivePresentation
+    mInteractive = False
 End Sub
 
 ' The old name, kept so an existing button or Alt+F8 habit still works.
@@ -107,13 +114,22 @@ Public Sub RefreshToCIn(ByVal pres As Presentation)
         ' not fit. Going smaller is not the answer -- at that point the slide
         ' is carrying more than a slide should. Say which ones, rather than
         ' leaving an overflow that looks like the bug this version fixed.
-        SetStatus pres, "Navigation v" & TOC_VERSION & " updated - " & _
+        SetStatus pres, "SciTeX ToC v" & TOC_VERSION & " updated - " & _
             CStr(sectionNumber) & " sections. Too much content at " & _
             CStr(mFontMin) & "pt on slide(s): " & mOverfullSlides & _
             ". Backup: " & BackupName()
     Else
-        SetStatus pres, "Navigation v" & TOC_VERSION & " updated - " & _
+        SetStatus pres, "SciTeX ToC v" & TOC_VERSION & " updated - " & _
             CStr(sectionNumber) & " sections. Backup: " & BackupName()
+    End If
+
+    ' Tell the person it worked, and where the backup went. Silence after a
+    ' button press is indistinguishable from nothing having happened.
+    If mInteractive Then
+        mInteractive = False
+        MsgBox "Table of contents updated: " & CStr(sectionNumber) & " sections." & _
+               vbCrLf & vbCrLf & "A copy of the deck as it was is saved beside it as" & _
+               vbCrLf & BackupName(), vbInformation, "SciTeX ToC"
     End If
     Exit Sub
 
@@ -122,8 +138,19 @@ Failed:
     ' may never open, and a script cannot read a dialog at all.
     WriteFailureLog pres, Err.Number, Err.Description
     On Error Resume Next
-    SetStatus pres, "Navigation error " & CStr(Err.Number) & ": " & Err.Description
+    SetStatus pres, "SciTeX ToC error " & CStr(Err.Number) & ": " & Err.Description
     On Error GoTo 0
+
+    ' SAY SO, when a person is there to read it. Operator, 2026-08-28: "as a
+    ' user I have no idea what is going on." Before this the run simply ended
+    ' -- correct for a script, useless for someone who pressed a button and
+    ' watched nothing happen. The dialog is shown ONLY for a person: raised in
+    ' an automated run it would be a window with nobody in front of it, and the
+    ' caller would wait on it forever. That is why this is not just Err.Raise.
+    If mInteractive Then
+        mInteractive = False
+        MsgBox Err.Description, vbExclamation, "SciTeX ToC"
+    End If
 End Sub
 
 ' Leave the reason somewhere a script can read it.
@@ -171,7 +198,6 @@ Private Sub ValidateDeck(ByVal pres As Presentation)
     Dim sld As Slide
     Dim tocSlides As Long
     Dim titled As Long
-    Dim hasStatus As Boolean
     Dim configSlide As Slide
     Dim minText As String
     Dim maxText As String
@@ -196,7 +222,6 @@ Private Sub ValidateDeck(ByVal pres As Presentation)
             End If
         End If
         If Not FindNamedShape(sld, TITLE_SHAPE) Is Nothing Then titled = titled + 1
-        If Not FindNamedShape(sld, STATUS_SHAPE) Is Nothing Then hasStatus = True
     Next sld
 
     If tocSlides = 0 Then
@@ -208,12 +233,15 @@ Private Sub ValidateDeck(ByVal pres As Presentation)
             "- No slide has a shape named " & TITLE_SHAPE & ", so the index would " & _
             "have nothing to list."
     End If
-    If Not hasStatus Then
-        problems = problems & vbCrLf & _
-            "- No shape named " & STATUS_SHAPE & " anywhere. The macro reports what " & _
-            "it did there, including any slide whose index did not fit -- without " & _
-            "it those findings have no reader."
-    End If
+    ' A MISSING STATUS SHAPE IS NOT A REFUSAL. It was, for about an hour on
+    ' 2026-08-28, and that stopped the operator's real deck dead: AICHI v18 has
+    ' 54 titled slides, nine index pages and no SCITEX_STATUS anywhere, so a
+    ' deck the macro had already laid out correctly was suddenly turned away.
+    '
+    ' The shape is where the run REPORTS, not something it needs in order to
+    ' work. Refusing over it fails the deck for the convenience of the message.
+    ' SetStatus falls back to the failure log when it finds nowhere to write, so
+    ' nothing is lost -- which was the actual worry.
 
     Set configSlide = FindConfigSlide(pres)
     If Not configSlide Is Nothing Then
@@ -647,6 +675,14 @@ Private Function UniformTitleSize(ByVal pres As Presentation) As Single
                             Set titleRange = titleShape.TextFrame.TextRange
                             titleRange.Font.Size = candidate
                             If titleRange.BoundWidth > room Then fitsAll = False
+                            ' Height matters as much as width.  Checking width
+                            ' alone let a size that fits ACROSS the title bar
+                            ' but not INSIDE it pass: on AICHI v18 every title
+                            ' box is 29pt tall, a 32pt line renders 38pt, and
+                            ' ten titles spilled onto the content below.
+                            If titleRange.BoundHeight > titleShape.Height Then
+                                fitsAll = False
+                            End If
                         End If
                     End If
                 End If
@@ -1627,14 +1663,39 @@ End Function
 Private Sub SetStatus(ByVal pres As Presentation, ByVal value As String)
     Dim sld As Slide
     Dim statusShape As Shape
+    Dim written As Boolean
 
     On Error Resume Next
     For Each sld In pres.Slides
         Set statusShape = FindNamedShape(sld, STATUS_SHAPE)
         If Not statusShape Is Nothing Then
             statusShape.TextFrame.TextRange.text = value
+            written = True
             Exit For
         End If
     Next sld
     On Error GoTo 0
+
+    ' Nowhere on the slides to say it, so say it in the log instead. A deck
+    ' without a status shape is a normal deck -- the operator's own is one --
+    ' and the report still has to land somewhere it can be read afterwards.
+    If Not written Then WriteRunLog pres, value
+End Sub
+
+' Leave a line where a reader can find it when the deck has no status shape.
+Private Sub WriteRunLog(ByVal pres As Presentation, ByVal value As String)
+    Dim handle As Integer
+    Dim target As String
+
+    On Error Resume Next
+    If pres Is Nothing Then Exit Sub
+    If Len(pres.Path) = 0 Then Exit Sub
+    target = pres.Path & PathSeparatorOf(pres) & "SciTeX_ToC.log.txt"
+    handle = FreeFile
+    Open target For Output As #handle
+    Print #handle, "SciTeX_ToC v" & TOC_VERSION
+    Print #handle, "deck: " & pres.FullName
+    Print #handle, value
+    Print #handle, "(this deck has no " & STATUS_SHAPE & " shape, so the run is reported here)"
+    Close #handle
 End Sub

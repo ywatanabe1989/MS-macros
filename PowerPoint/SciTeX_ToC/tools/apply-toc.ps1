@@ -115,10 +115,16 @@ try {
     # macro name plus a parameter array and PowerShell will not supply the
     # optional half -- "Cannot find an overload for Run and the argument
     # count: 1". InvokeMember hands COM the argument array directly.
+    # Qualify the macro with its presentation.  Application.Run resolves a BARE
+    # name against every open presentation, so an older copy of this module sitting
+    # in another open deck (the distributable template, say) can win the lookup and
+    # run instead -- silently, with no error, producing output from stale code.
+    $qualified = "'" + $presentation.Name + "'!SciTeX_ToC.RefreshToCIn"
+    Write-Output ("invoking " + $qualified)
     $app.GetType().InvokeMember(
         "Run",
         [System.Reflection.BindingFlags]::InvokeMethod,
-        $null, $app, @("RefreshToCIn", $presentation)) | Out-Null
+        $null, $app, @($qualified, $presentation)) | Out-Null
     Write-Output "RefreshToCIn returned"
 
     # 25 = ppSaveAsOpenXMLPresentationMacroEnabled
