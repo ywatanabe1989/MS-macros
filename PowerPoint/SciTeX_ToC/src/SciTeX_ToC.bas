@@ -395,7 +395,7 @@ Private Sub RebuildFullToc(ByVal pres As Presentation, ByVal tocSlide As Slide)
             Loop
             Set linkRange = paragraphRange.Characters(1, linkLength)
             ClearTextHyperlink linkRange
-            If targetSection = currentSection Then
+            If targetSection = currentSection And Not IsSkippedInShow(target) Then
                 linkRange.Font.Color.RGB = RGB(27, 38, 53)
                 paragraphRange.Font.Color.RGB = RGB(27, 38, 53)
             Else
@@ -835,7 +835,7 @@ Private Sub RebuildTocColumn(ByVal pres As Presentation, ByVal tocSlide As Slide
                 Set paragraphRange = body.TextFrame.TextRange.Paragraphs(lineNumber, 1)
                 Set linkRange = EntryRange(paragraphRange)
                 ClearTextHyperlink linkRange
-                If targetSection = currentSection Then
+                If targetSection = currentSection And Not IsSkippedInShow(target) Then
                     linkRange.Font.Color.RGB = RGB(27, 38, 53)
                     paragraphRange.Font.Color.RGB = RGB(27, 38, 53)
                 Else
@@ -1463,6 +1463,15 @@ Private Function ParseBoolean(ByVal value As String) As Boolean
         Case Else
             Err.Raise vbObjectError + 2112, , "Hide hidden slides must be Yes or No."
     End Select
+End Function
+
+' A hidden slide is one the talk SKIPS. Listing it is deliberate -- the
+' material exists and the reader may want it afterwards -- but drawing it in
+' the current-section ink promises we are about to cover it, which is the
+' opposite of true. Tinting it like the other sections says the honest thing:
+' listed, not visited.
+Private Function IsSkippedInShow(ByVal sld As Slide) As Boolean
+    IsSkippedInShow = (sld.SlideShowTransition.Hidden <> msoFalse)
 End Function
 
 Private Function ShouldIncludeInToc(ByVal sld As Slide) As Boolean
