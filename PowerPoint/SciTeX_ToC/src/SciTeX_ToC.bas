@@ -488,11 +488,31 @@ Private Function RenumberTocDrivenSlides(ByVal pres As Presentation) As Long
                 sld.Tags.Add TAG_CURRENT_SECTION, CStr(sectionNumber)
                 SetTocVisibleTitle sld, sectionTitle
             ElseIf sectionNumber > 0 Then
-                childNumber = childNumber + 1
-                baseTitle = StripNavigationPrefix(GetSlideTitle(sld))
-                navigationCode = CStr(sectionNumber) & LetterCode(childNumber)
-                SetSlideTitle sld, navigationCode & ". " & baseTitle
-                sld.Tags.Add TAG_NAV_CODE, navigationCode
+                ' A slide with no SCITEX_TITLE is not part of the navigation:
+                ' there is nowhere to write its number and nothing for the index
+                ' to show. Decks acquire such slides by import -- slide 38 of the
+                ' 静岡市 deck is a Google Slides worksheet whose shapes are all
+                ' named "Google Shape;1197;p76" -- and they are normally hidden.
+                '
+                ' This used to raise, which aborted RenumberTocDrivenSlides
+                ' BEFORE RebuildFullToc ever ran. The macro then reported a
+                ' failure, saved, and left the previous index in place: the run
+                ' looked like it had done nothing rather than like it had
+                ' stopped. Measured 2026-09-02 on that deck -- every run since
+                ' the worksheet was added had been failing this way.
+                '
+                ' Skipping keeps the letters contiguous (childNumber is only
+                ' advanced for slides that get a code) and drops any stale code
+                ' the slide carried from an earlier layout.
+                If FindNamedShape(sld, TITLE_SHAPE) Is Nothing Then
+                    DeleteSlideTag sld, TAG_NAV_CODE
+                Else
+                    childNumber = childNumber + 1
+                    baseTitle = StripNavigationPrefix(GetSlideTitle(sld))
+                    navigationCode = CStr(sectionNumber) & LetterCode(childNumber)
+                    SetSlideTitle sld, navigationCode & ". " & baseTitle
+                    sld.Tags.Add TAG_NAV_CODE, navigationCode
+                End If
             Else
                 DeleteSlideTag sld, TAG_NAV_CODE
             End If
